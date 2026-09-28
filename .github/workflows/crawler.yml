@@ -214,6 +214,28 @@ jobs:
           # 在 set -e 下 `git add` 会因 "pathspec did not match" 直接终止整个步骤。
           echo "报告已就绪于 docs/reports/，等待 Sync 步骤提交到 reports 分支"
 
+      # ── 生成 X 卡片（文案 + 竖版配图）───────────────────────────────────
+      # 产物落在 docs/x/ 下，会跟着下面的 Sync 步骤一起上线到 reports 分支，
+      # 因此卡片图的公网地址恒为 <站点>/x/card.png
+      # 同一个文件每轮覆盖，不按日期堆积（按日期存一年会长到几百 MB）。
+      - name: Generate X card
+        if: success()
+        env:
+          SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: |
+          set -e
+          mkdir -p docs/x
+          python3 scripts/gen_x_card.py --site "$SITE_URL"
+          CHROME=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)
+          if [ -z "$CHROME" ]; then echo "❌ 找不到 Chrome，无法截图"; exit 1; fi
+          "$CHROME" --headless=new --disable-gpu --no-sandbox --disable-dev-shm-usage \
+            --in-process-gpu --hide-scrollbars --force-device-scale-factor=2 \
+            --user-data-dir="$RUNNER_TEMP/chrome-x" \
+            --window-size=1200,1500 --virtual-time-budget=5000 \
+            --screenshot="$PWD/docs/x/card.png" "file://$PWD/docs/x/card.html"
+          test -s docs/x/card.png || { echo "❌ 卡片截图失败"; exit 1; }
+          ls -lh docs/x/
+
       # ── 提交到 reports 分支（Pages 发布源）─────────────────────────────
       # Pages 现在从 reports 分支根目录读取，这一步就是网站的发布动作。
       #
@@ -230,6 +252,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/sync_reports_branch.py --from-dir=docs
+
+      # ── 推送 X 素材到飞书 ──────────────────────────────────────────────
+      # 放在 Sync 之后，确保卡片图链接已经上线再推送。
+      # 脚本自带时间窗口（07:30-08:30 / 20:30-21:30），定时运行不会每半小时刷屏；
+      # 手动触发时强制发送，方便随时验证效果。
+      - name: Notify X card to Feishu
+        if: success()
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+          FORCE_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
+        run: python3 scripts/notify_x_card.py --site "$SITE_URL" $FORCE_FLAG
 
       # --------------------------------------------------------------------------------
       # ☁️ CLOUDFLARE PAGES DEPLOY / 部署到 Cloudflare Pages（可选）
