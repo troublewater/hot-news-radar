@@ -358,7 +358,8 @@ _STORY_AD = re.compile(
     r"㎡|洋房|楼盘|户型|首付|总价|样板间")
 # 标题里带这些的，正文写得再像样也是「一整年沙雕新闻合集」或软广，不是单个故事
 _STORY_NOISE_TITLE = re.compile(
-    r"沙雕|奇葩新闻|盘点|大赏|出炉|来袭|年度|十大|榜单|图集|^\d{4}年")
+    r"沙雕|奇葩新闻|盘点|大赏|出炉|来袭|年度|十大|榜单|图集|^\d{4}年|"
+    r"设备|厂家|批发|招商|代理|定制|供应|语音盒|海量|包邮")
 # 百科词条式的开头（「彩礼，中国旧时婚礼程序之一」）不是故事
 _STORY_WIKI = re.compile(r".{0,16}(又称|也称|是一种|是指|释义)")
 
@@ -488,7 +489,7 @@ def enrich_fulltext(stories, chars=_ARTICLE_CHARS):
             st["desc"] = body
             st["url"] = real                       # 换成正主地址，搜狗那个跳转是有时效的
             got += 1
-        time.sleep(0.4)                            # 别把搜狗和微信惹毛
+        time.sleep(0.6)                            # 连着换地址容易被限流，间隔别抠
     print(f"  正文补全：{got}/{len(stories)} 条拿到原文")
     return stories
 
@@ -715,7 +716,8 @@ def _story_key(s):
     fun = 0 if _STORY_FUN.search(text) else 1
     family = 1 if _STORY_HOT.search(text) else 0
     n = len(s["desc"])
-    short = 0 if n >= 80 else (80 - n) // 20 + 1     # 正文长是好事，只有太短才扣分
+    short = max(0, 300 - n) // 60                    # 拿到原文的（400 字上下）排前面，
+                                                     # 只有搜狗摘要的往后放
     return (fun, family, short)
 
 
