@@ -38,12 +38,13 @@ def in_window(now):
 def build_content(copy_text, image_url, site_url, now=None):
     now = now or datetime.now(CN_TZ)
     # 首行固定含「热点」：飞书自定义机器人的关键词校验可用 批次,热点 两个词兜住
-    parts = [f"📮 今日热点 · X 素材（{now.strftime('%m/%d')}）", "", copy_text.strip()]
+    parts = [f"📮 今日热点 · X 素材（{now.strftime('%m/%d')}）", ""]
     if image_url:
         # 不能用 ![](url)：飞书把 markdown 图片当 img_key 校验，只认自家上传的图，
         # 传外链会被拒收（11246 / invalid image keys）。自定义机器人拿不到 img_key，
         # 所以退成普通链接，点开即可看/下载。
-        parts += ["", "—— 卡片图 ——", f"[🖼 点此查看卡片图]({image_url})"]
+        parts += ["【板块一 · 官方消息｜图】", f"[🖼 点此查看卡片图]({image_url})", ""]
+    parts += ["【板块二 · 段子｜X 文案】", copy_text.strip()]
     if site_url:
         parts += ["", f"[打开站点]({site_url})"]
     return "\n".join(parts)
