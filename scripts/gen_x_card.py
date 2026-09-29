@@ -251,10 +251,10 @@ def render_card(items, site, now=None, top=8, handle=""):
             tags.append(_tag("hot", f"多平台共振 ×{len(it['platforms'])}"))
         if it["rank"] < 9999:
             tags.append(_tag("", f"第 {it['rank']} 位"))
+        # 只标「上升」。上游把几乎整张榜都算成 down（实测 137 条里 23 down / 2 up），
+        # 满屏「↓ 下降」像坏掉了，而榜单里本来都是往上走的话题，下行信息没有价值。
         if it["trend"] == "up":
             tags.append(_tag("up", "↑ 上升"))
-        elif it["trend"] == "down":
-            tags.append(_tag("down", "↓ 下降"))
         if it["count"]:
             tags.append(_tag("", it["count"]))
         rows.append(
@@ -360,6 +360,8 @@ def main():
         card2 = render_card(demo, args.site, handle="@demo")
         assert "多平台共振 ×2" in card2, "多平台共振标签没渲染"
         assert "↑ 上升" in card2 and "3次" in card2, "涨跌/次数标签没渲染"
+        down = dict(demo[0], trend="down")
+        assert "下降" not in render_card([down], args.site, handle="@demo"), "下降标签该被去掉"
         long3 = [{"title": "测试条目", "url": "https://example.com",
                   "platforms": ["甲", "乙", "丙", "丁", "戊"], "rank": 9, "trend": "", "count": ""}]
         card3 = render_card(long3, args.site, handle="@demo")
