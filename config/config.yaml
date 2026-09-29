@@ -99,6 +99,21 @@ platforms:
     - id: "zhihu"
       name: "知乎"
       expected_domain: "zhihu.com"
+    - id: "hupu"
+      name: "虎扑"
+      expected_domain: "hupu.com"
+    - id: "douban"
+      name: "豆瓣电影"
+      expected_domain: "douban.com"
+    - id: "coolapk"
+      name: "酷安"
+      expected_domain: "coolapk.com"
+    - id: "ithome"
+      name: "IT之家"
+      expected_domain: "ithome.com"
+    - id: "v2ex"
+      name: "V2EX"
+      expected_domain: "v2ex.com"
 
 
 
