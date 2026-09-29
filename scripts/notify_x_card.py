@@ -40,7 +40,10 @@ def build_content(copy_text, image_url, site_url, now=None):
     # 首行固定含「热点」：飞书自定义机器人的关键词校验可用 批次,热点 两个词兜住
     parts = [f"📮 今日热点 · X 素材（{now.strftime('%m/%d')}）", "", copy_text.strip()]
     if image_url:
-        parts += ["", "—— 卡片图 ——", f"![今日卡片]({image_url})"]
+        # 不能用 ![](url)：飞书把 markdown 图片当 img_key 校验，只认自家上传的图，
+        # 传外链会被拒收（11246 / invalid image keys）。自定义机器人拿不到 img_key，
+        # 所以退成普通链接，点开即可看/下载。
+        parts += ["", "—— 卡片图 ——", f"[🖼 点此查看卡片图]({image_url})"]
     if site_url:
         parts += ["", f"[打开站点]({site_url})"]
     return "\n".join(parts)
@@ -85,7 +88,8 @@ def main():
         assert payload["card"]["schema"] == "2.0", "卡片版本不对"
         el = payload["card"]["body"]["elements"][0]
         assert el["tag"] == "markdown" and "热点" in el["content"], "关键词兜底字样丢了"
-        assert "![今日卡片]" in el["content"], "图片标记没生成"
+        assert "[🖼 点此查看卡片图](https://example.com/x/card.png)" in el["content"], "图片链接没生成"
+        assert "![" not in el["content"], "不能再用 markdown 图片语法，飞书会拒收外链"
         assert json.dumps(payload, ensure_ascii=False), "payload 无法序列化"
         assert in_window(datetime(2026, 9, 29, 8, 0, tzinfo=CN_TZ)), "早窗口判定错"
         assert not in_window(datetime(2026, 9, 29, 12, 0, tzinfo=CN_TZ)), "午间不应在窗口内"
