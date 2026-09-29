@@ -300,10 +300,15 @@ _STORY_KEYWORDS = [
     "楼上 漏水", "借钱 不还", "教育 内卷",
 ]
 
-# 题材归类：一篇帖子里同一题材最多 2 条，否则 12 条全长一个样，一眼机器人。
+# 题材归类：一批素材里同一题材最多 2 条，否则 30 条里六七条都是份子钱，一眼机器。
+# 词表要够宽，漏掉的题材（份子钱、扶弟魔）根本没机会被压。
 _THEME_WORDS = [
-    "彩礼", "相亲", "婆婆", "大姑", "婚闹", "月子", "借钱", "房子",
-    "工资", "老板", "同事", "邻居", "物业", "装修", "孩子", "学校", "医院",
+    "彩礼", "嫁妆", "相亲", "订婚", "退婚", "离婚", "出轨", "前任", "婚闹",
+    "婆婆", "公公", "大姑", "小姑", "小叔", "舅子", "扶弟", "月子", "婆媳",
+    "份子钱", "随礼", "借钱", "还钱", "拆迁", "房子", "房贷", "学区房",
+    "工资", "老板", "同事", "加班", "裁员", "邻居", "物业", "装修",
+    "孩子", "家长群", "学校", "老师", "医院", "养老", "父母", "亲戚",
+    "网购", "快递", "外卖", "手机", "游戏",
 ]
 
 # 故事感强的题材：讲钱、讲亲戚、讲婚姻的，才是这个板块要的东西
@@ -352,7 +357,7 @@ def _get(url, timeout=25):
         return ""
 
 
-def fetch_stories(keywords=None, now=None, limit=12, per_keyword=5):
+def fetch_stories(keywords=None, now=None, limit=12, per_keyword=6):
     """搜狗微信 -> [{'title','desc'}]。抓不到返回 []，调用方回退到榜单标题。"""
     now = now or datetime.now()
     kws = list(keywords or _STORY_KEYWORDS)
@@ -382,8 +387,38 @@ _HUPU_LIST = "https://bbs.hupu.com/bxj"
 _HUPU_BODY = re.compile(r'(?s)class="thread-content-detail">(.*?)</div>')
 
 
-def _hupu_material(detail):
-    """首帖 + 前几条热评。步行街的乐子一半在评论里，只看首帖经常只有一句话。
+def _paragraphs(text, budget=52, max_par=4):
+    """切成「一到三行一段」的短段落。
+
+    这是那条爆帖的精髓：句子短、段与段之间空一行，读起来有呼吸感。
+    先按句末标点断句，超预算的长句再按逗号断，最后按字数预算拼回段落
+    （太碎的一行一段反而像机器人在数数）。
+    """
+    pieces = []
+    for sent in re.split(r"(?<=[。！？…])", text):
+        sent = sent.strip()
+        if not sent or not re.search(r"[\w\u4e00-\u9fff]", sent):
+            continue                                   # 纯标点的碎片不算一段
+        if len(sent) <= budget:
+            pieces.append(sent)
+            continue
+        buf = ""
+        for seg in re.split(r"(?<=[，,；;])", sent):
+            if buf and len(buf) + len(seg) > budget:
+                pieces.append(buf)
+                buf = seg
+            else:
+                buf += seg
+        if buf:
+            pieces.append(buf)
+
+    # 每两片拼一段：一到三行的长度，太碎的一行一段反而像机器人在数数
+    paras = ["".join(pieces[i:i + 2]) for i in range(0, len(pieces), 2)]
+    return paras[:max_par]
+
+
+def _hupu_material(detail, max_replies=3):
+    """首帖正文 + 前几条热评。步行街的乐子一半在评论里，只看首帖经常只有一句话。
 
     同一个帖子页里 seo-dom 会把首帖再抄一遍，所以先去重。
     """
@@ -398,9 +433,8 @@ def _hupu_material(detail):
             seen.add(text)
             blocks.append(text)
     if not blocks:
-        return ""
-    first, replies = blocks[0], blocks[1:4]
-    return first + (" 热评：" + " ｜ ".join(replies) if replies else "")
+        return "", []
+    return blocks[0], blocks[1:1 + max_replies]
 
 
 # 列表行自带「回复 / 浏览」，按回复数挑热的抓，命中率比顺着列表抓高得多：
@@ -427,11 +461,11 @@ def fetch_hupu(limit=4, probe=12):
             continue
         seen.add(href)
         detail = _get("https://bbs.hupu.com" + href)
-        body = _hupu_material(detail) if detail else ""
-        if len(body) < 50:
+        body, replies = _hupu_material(detail) if detail else ("", [])
+        if len(body) + sum(len(r) for r in replies) < 50:
             continue
-        out.append({"title": title, "desc": body[:600], "src": "虎扑步行街",
-                    "url": "https://bbs.hupu.com" + href})
+        out.append({"title": title, "desc": body, "replies": replies,
+                    "src": "虎扑步行街", "url": "https://bbs.hupu.com" + href})
         if len(out) >= limit:
             break
         time.sleep(0.8)
@@ -465,7 +499,7 @@ def fetch_tieba(limit=3):
 
 def collect_stories(top):
     """汇总三个源并按题材去重。交错着取，免得一个源把另一个挤没。"""
-    groups = [fetch_stories(), fetch_hupu(limit=4), fetch_tieba(limit=3)]
+    groups = [fetch_stories(), fetch_hupu(limit=4), fetch_tieba(limit=2)]
     pool = []
     for i in range(max((len(x) for x in groups), default=0)):
         pool += [x[i] for x in groups if i < len(x)]
@@ -478,6 +512,8 @@ def _story_ok(desc):
         return False
     if re.match(r"^\d+", desc):                       # 网文章节开头都是「07 婆婆把…」
         return False
+    if len(re.findall(r"\d+\s*[、.]", desc)) >= 3:
+        return False                                  # 「27、…28、…29、…」是连载目录
     if _STORY_AD.search(desc) or _STORY_NOISE.search(desc):
         return False
     if _STORY_WIKI.search(desc[:26]):
@@ -489,17 +525,25 @@ def _story_ok(desc):
 
 
 def _pick_stories(stories, top):
-    """同一题材最多 2 条，把位置让给别的故事。"""
-    picked, used = [], {}
-    for st in sorted(stories, key=_story_key):
-        theme = next((w for w in _THEME_WORDS if w in st["title"]), "")
-        if theme and used.get(theme, 0) >= 2:
-            continue                       # 没归上类的不卡，否则虎扑的帖子全被挤掉
-        if theme:
-            used[theme] = used.get(theme, 0) + 1
-        picked.append(st)
-        if len(picked) >= top:
-            break
+    """同一题材先最多 2 条；凑不够 top 再放宽到 3 条、4 条。
+
+    宁可要 25 条不重样的，也不要 30 条里六七条都是份子钱。
+    """
+    ordered, picked, taken = sorted(stories, key=_story_key), [], set()
+    for cap in (2, 3, 4):
+        used = {}
+        for idx, st in enumerate(ordered):
+            if idx in taken:
+                continue
+            theme = next((w for w in _THEME_WORDS if w in st["title"]), "")
+            if theme:
+                if used.get(theme, 0) >= cap:
+                    continue                   # 没归上类的不卡，否则虎扑的帖子全被挤掉
+                used[theme] = used.get(theme, 0) + 1
+            taken.add(idx)
+            picked.append(st)
+            if len(picked) >= top:
+                return picked
     return picked
 
 
@@ -572,14 +616,15 @@ def render_pool(stories, now=None, top=12, sep="-" * 18):
     blocks = []
     for i, st in enumerate(stories[:top], 1):
         mark = _MARKS[i - 1] if i <= len(_MARKS) else f"{i}."
-        blocks.append("\n".join([
-            f"{mark} {st['title']}",
-            "",
-            st["desc"][:400],          # 整段留在 sources.txt，发帖正文别把 800 字全砸进去
-            "",
-            _HOOK_SELF[(seed + i) % len(_HOOK_SELF)],
-            _ASK_ONE[(seed * 5 + i) % len(_ASK_ONE)],
-        ]))
+        lines = [f"{mark} {st['title']}", ""]
+        for para in _paragraphs(st["desc"]):
+            lines += [para, ""]
+        # 虎扑的热评单独成段，天然就是「网友说」的对话感
+        for reply in st.get("replies", []):
+            lines += [f"网友：{reply[:90]}", ""]      # 完整热评留在 sources.txt
+        lines += [_HOOK_SELF[(seed + i) % len(_HOOK_SELF)],
+                  _ASK_ONE[(seed * 5 + i) % len(_ASK_ONE)]]
+        blocks.append("\n".join(lines))
     return ("\n" + sep + "\n").join(blocks) + "\n"
 
 
@@ -594,7 +639,9 @@ def render_sources(stories, now=None):
         if st.get("url"):
             out.append(f"原文：{st['url']}")
         out.append("")
-        out.append(st["desc"])
+        out.append(st["desc"])          # 素材要原样，不做段落切分
+        for reply in st.get("replies", []):
+            out.append(f"热评：{reply}")
         out.append("")
     return "\n".join(out)
 
@@ -634,8 +681,8 @@ def main():
     ap.add_argument("--site", default=DEFAULT_SITE)
     ap.add_argument("--top", type=int, default=8)
     ap.add_argument("--copy-top", type=int, default=25, help="X 文案里列几条")
-    ap.add_argument("--story-top", type=int, default=12,
-                    help="从公众号故事里取几条（带正文，12 条已经比 25 条标题还长）")
+    ap.add_argument("--story-top", type=int, default=30,
+                    help="素材池放几条（都带正文，用户自己挑着一条条发）")
     ap.add_argument("--no-stories", action="store_true", help="不抓公众号故事，退回榜单标题")
     ap.add_argument("--handle", default="", help="卡片右下角署名，如 @your_x_handle")
     ap.add_argument("--selftest", action="store_true")
@@ -716,6 +763,17 @@ def main():
         assert "彩礼钱我和你爸出" in scopy, "故事正文没进文案"
         assert "http" not in scopy and "#" not in scopy, "发帖素材里不该有链接"
         assert sum(h in scopy for h in _HOOK_SELF) == 2, "两条素材没各带自己的钩子"
+        # 隔断式：一到三行一段、段间空行；虎扑热评要单独成段
+        paras = _paragraphs("第一句。第二句。第三句。第四句。第五句。第六句。第七句。")
+        assert len(paras) == 4 and all(len(p) <= 60 for p in paras), paras
+        assert _paragraphs("。") == [] and _paragraphs("") == [], "空输入不该切出段落"
+        assert _paragraphs("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十，后半句"), \
+            "没有句号的长句也要能断"
+        hupu = [{"title": "虎扑一条", "desc": "楼主说了一句话。又补了一句。",
+                 "replies": ["第一条回复", "第二条回复"], "src": "虎扑步行街", "url": ""}]
+        hcopy = render_pool(hupu, top=1, now=datetime(2026, 9, 29, 8, 0))
+        assert "网友：第一条回复" in hcopy and "网友：第二条回复" in hcopy, "热评没单独成段"
+        assert "\n\n" in hcopy, "段落之间没有空行，不是隔断式"
         assert "你刷到哪条" not in scopy and "这几条" not in scopy, "单条素材不该用「几选一」的口气提问"
         assert any(a in scopy for a in _ASK_ONE), "单条素材没带追问"
         assert _story_ok("彩礼，中国旧时婚礼程序之一，又称财礼、聘礼等。") is False, "百科词条不算故事"
@@ -781,7 +839,8 @@ def main():
     src_note = f"故事 {len(stories):>2} 条（{mix}）" if stories else "⚠️ 没抓到故事，退回榜单标题"
     print(f"板块二 素材      {src_note} -> {out/'copy.txt'}"
           f"，最长一条 {per} 字符 {warn}")
-    for i, it in enumerate((stories or sorted(items, key=_sort_key))[: args.copy_top], 1):
+    shown = (stories or sorted(items, key=_sort_key))[: args.story_top if stories else args.copy_top]
+    for i, it in enumerate(shown, 1):
         print(f"  {i:>2}. {it['title'][:44]}")
 
 
