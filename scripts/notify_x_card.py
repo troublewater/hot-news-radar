@@ -46,7 +46,9 @@ def build_content(copy_text, image_url, site_url, now=None):
         parts += ["【板块一 · 官方消息｜图】", f"[🖼 点此查看卡片图]({image_url})", ""]
     parts += ["【板块二 · 段子｜X 文案】", copy_text.strip()]
     if site_url:
-        parts += ["", f"[打开站点]({site_url})"]
+        # 素材池是「一条一条发」用的，原文和出处单独放一份，方便自己改写
+        parts += ["", f"[📄 二创素材（原文 + 出处）]({site_url}/x/sources.txt)",
+                  "", f"[打开站点]({site_url})"]
     return "\n".join(parts)
 
 
@@ -90,6 +92,7 @@ def main():
         el = payload["card"]["body"]["elements"][0]
         assert el["tag"] == "markdown" and "热点" in el["content"], "关键词兜底字样丢了"
         assert "[🖼 点此查看卡片图](https://example.com/x/card.png)" in el["content"], "图片链接没生成"
+        assert "https://example.com/x/sources.txt" in el["content"], "二创素材链接没生成"
         assert "![" not in el["content"], "不能再用 markdown 图片语法，飞书会拒收外链"
         assert json.dumps(payload, ensure_ascii=False), "payload 无法序列化"
         assert in_window(datetime(2026, 9, 29, 8, 0, tzinfo=CN_TZ)), "早窗口判定错"
