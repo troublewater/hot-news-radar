@@ -5,13 +5,16 @@
 - docs/reports/feed.json  (JSON Feed 1.1，机器可读，供第三方系统消费)
 """
 import json
+import os
 import re
 from datetime import datetime
 from html import escape as esc
 from pathlib import Path
 
 BASE = Path("docs/reports")
-SITE = "https://leilaomi.github.io/hot-news-radar"
+# fork 后站点域名会变：优先取 CI 注入的仓库名，不再写死作者域名
+_REPO = os.environ.get("GITHUB_REPOSITORY", "leilaomi/hot-news-radar")
+SITE = (os.environ.get("SITE_URL") or f"https://{_REPO.replace('/', '.github.io/')}").rstrip("/")
 
 
 def collect_items():

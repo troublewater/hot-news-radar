@@ -17,6 +17,7 @@
 
 import argparse
 import html
+import os
 import re
 import sys
 from datetime import datetime
@@ -26,7 +27,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 WEEKDAY = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-DEFAULT_SITE = "https://troublewater.github.io/hot-news-radar"
+_REPO = os.environ.get("GITHUB_REPOSITORY", "troublewater/hot-news-radar")
+DEFAULT_SITE = (os.environ.get("SITE_URL") or f"https://{_REPO.replace('/', '.github.io/')}").rstrip("/")
 
 _SOURCE_RE = re.compile(r'<span class="source-name">([^<]+)</span>')
 _RANK_RE = re.compile(r'<span class="rank-num[^"]*">([^<]+)</span>')
