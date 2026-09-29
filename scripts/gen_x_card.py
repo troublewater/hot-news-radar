@@ -8,8 +8,10 @@
 
 板块二（非官方段子 -> 纯文字 -> X）
     docs/x/copy.txt    推文文案草稿
-    排序：同样是共振优先，但叠加「排他性」权重——各平台第 1 条是所有人都在抄的，
-    给它降权，优先「多平台 + 还在上升 + 名次在中段」的条目。
+    正文不是榜单标题，而是从搜狗微信抓来的公众号故事（标题 + 文章首段摘要）。
+    榜单接口每条只有 id/title/url、没有正文，直接发标题和卡片图没区别，
+    用户要的是「能读下去的故事」，所以正文必须另找来源（见 fetch_stories）。
+    故事抓不到时退回旧行为：拿榜单条目凑数，排序叠加「排他性」权重。
 
 两个板块靠标题特征区分（见 is_gossip 上面的 _GOSSIP_* 规则）。
 条目附带上榜平台、最高名次、排名涨跌、在榜次数 —— 这些报告里本来就有，不额外调 AI。
@@ -25,6 +27,9 @@ import html
 import os
 import re
 import sys
+import time
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -274,6 +279,139 @@ def render_card(items, site, now=None, top=8, handle=""):
 """
 
 
+# ── 段子正文从哪来 ─────────────────────────────────────────────────────
+# 榜单接口每条只有 id/title/url，没有正文，所以「标题 + 内容」里的内容只能另找。
+# 搜狗微信是唯一免登录、还能同时拿到「标题 + 文章首段摘要」的公众号入口；
+# 已实测 GitHub runner（美国机房）可直连。知乎热榜从 CI 过去是 403，别再试。
+_SOGOU_PAT = re.compile(
+    r'(?s)<div class="txt-box">.*?<h3>\s*<a[^>]*>(.*?)</a>.*?<p class="txt-info"[^>]*>(.*?)</p>')
+
+# 按天轮换，一次只问 12 个：搜狗按 IP 限流，一口气问太多会被拉黑。
+_STORY_KEYWORDS = [
+    "彩礼涨价", "相亲翻车", "婆婆 房子", "大姑姐", "扶弟魔", "婚闹",
+    "退婚 不退钱", "亲戚借钱", "家长群", "份子钱", "同学会", "月子仇",
+    "婆媳 矛盾", "小舅子", "婚后 工资上交", "婚前 房子加名",
+    "同事 甩锅", "老板 画饼", "邻居 噪音", "物业 业主", "装修 被坑",
+    "楼上 漏水", "借钱 不还", "教育 内卷",
+]
+
+# 题材归类：一篇帖子里同一题材最多 2 条，否则 12 条全长一个样，一眼机器人。
+_THEME_WORDS = [
+    "彩礼", "相亲", "婆婆", "大姑", "婚闹", "月子", "借钱", "房子",
+    "工资", "老板", "同事", "邻居", "物业", "装修", "孩子", "学校", "医院",
+]
+
+# 故事感强的题材：讲钱、讲亲戚、讲婚姻的，才是这个板块要的东西
+_STORY_HOT = re.compile(
+    r"彩礼|嫁妆|婆婆|公公|大姑|小姑|小叔|舅子|扶弟|婚闹|相亲|订婚|退婚|离婚|出轨|"
+    r"房子|房产|加名|工资|存款|借钱|份子钱|月子|学区房|法院|起诉|报警")
+
+# 连载小说、引流广告都不是真事，别混进帖子里
+_STORY_NOISE = re.compile(r"（上）|（下）|\(上\)|\(下\)|第[一二三四五六七八九十\d]+章|合集|推荐阅读|点击阅读原文|推荐上集|上集阅读|下集阅读|未完待续")
+_STORY_AD = re.compile(r"个人微信|微信号|加我微信|扫码关注|点击上方")
+
+
+def _clean_text(s):
+    """搜狗把中文标点统一换成了半角，直接发出去很出戏。"""
+    s = html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
+    s = re.sub(r"[.．]{2,}$", "…", s)                 # 先收尾，否则句号会被拆成「。…」
+    s = re.sub(r'^[”"’]+', "", s)                     # 摘要常从半句引号中间切进来
+    # 闭引号、右括号跟在中文后面时也算「中文语境」，否则「问题”.「下一句」会漏掉
+    cjk = r"[\u4e00-\u9fff”’】）》\]]"
+    s = re.sub(rf"(?<={cjk})[,](?!\d)", "，", s)
+    s = re.sub(rf"(?<={cjk})\.(?![a-zA-Z0-9])", "。", s)
+    s = re.sub(rf"(?<={cjk})\?", "？", s)
+    s = re.sub(rf"(?<={cjk})!", "！", s)
+    s = re.sub(rf"(?<={cjk}):", "：", s)
+    s = re.sub(rf"(?<={cjk});", "；", s)
+    s = re.sub(r"(?<=[\u4e00-\u9fff])[—–\-](?=[\u4e00-\u9fff])", "，", s)   # 标题里的半角连字符
+    s = re.sub(r"[!！]{2,}", "！", s)
+    s = re.sub(r"[?？]{2,}", "？", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _get(url, timeout=25):
+    """抓不到就返回空串——单个源挂了不该让整条流水线跟着挂。"""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", "ignore")
+    except Exception as exc:  # noqa: BLE001 - 单个源失败不该中断整轮
+        print(f"  ⚠️ 抓取失败 {url[:56]}：{type(exc).__name__}: {exc}")
+        return ""
+
+
+def fetch_stories(keywords=None, now=None, limit=12, per_keyword=5):
+    """搜狗微信 -> [{'title','desc'}]。抓不到返回 []，调用方回退到榜单标题。"""
+    now = now or datetime.now()
+    kws = list(keywords or _STORY_KEYWORDS)
+    start = (now.toordinal() * 3) % len(kws)          # 每天换一批词，顺带避开限流
+    kws = (kws + kws)[start:start + limit]
+
+    stories, seen = [], set()
+    for kw in kws:
+        page = _get("https://weixin.sogou.com/weixin?type=2&query=" + urllib.parse.quote(kw))
+        if not page:
+            continue
+        for raw_title, raw_desc in _SOGOU_PAT.findall(page)[:per_keyword]:
+            title, desc = _clean_text(raw_title), _clean_text(raw_desc)
+            if not desc or title in seen:
+                continue
+            if _STORY_NOISE.search(title) or _STORY_AD.search(desc) or not _story_ok(desc):
+                continue
+            seen.add(title)
+            stories.append({"title": title, "desc": desc})
+        time.sleep(1.5)                               # 搜狗按 IP 限流，问太快会被拦
+    return stories
+
+
+def _story_ok(desc):
+    """退回的是「没内容」的东西：图片集、连载目录、排版烂到没有标点的长句。"""
+    if len(desc) < 30 or "▼" in desc:
+        return False
+    if re.match(r"^\d+", desc):                       # 网文章节开头都是「07 婆婆把…」
+        return False
+    if _STORY_AD.search(desc) or _STORY_NOISE.search(desc):
+        return False
+    # 正常白话大约每 20 字一个标点；整段几乎没有标点的是复制粘贴的烂排版
+    if len(re.findall(r"[。，！？、；：]", desc)) * 45 < len(desc):
+        return False
+    return True
+
+
+def _pick_stories(stories, top):
+    """同一题材最多 2 条，把位置让给别的故事。"""
+    picked, used = [], {}
+    for st in sorted(stories, key=_story_key):
+        theme = next((w for w in _THEME_WORDS if w in st["title"]), "其它")
+        if used.get(theme, 0) >= 2:
+            continue
+        used[theme] = used.get(theme, 0) + 1
+        picked.append(st)
+        if len(picked) >= top:
+            break
+    return picked
+
+
+def _story_key(s):
+    """故事度：讲钱讲亲戚的优先；摘要太短没内容、太长读不完的都压一压。"""
+    juicy = 0 if _STORY_HOT.search(s["title"] + s["desc"]) else 1
+    return (juicy, abs(len(s["desc"]) - 110) // 20)
+
+
+# 段子板块的开头：这里是公众号里的故事，不是热搜榜，措辞得对得上。
+_STORY_OPENERS = [
+    "攒了几个故事，一个比一个上头：",
+    "刷到几个故事，看完只想说：这也行？",
+    "挑几个故事讲讲，都是那种「谁遇上谁头大」的：",
+    "这几个故事我看了两遍，替当事人着急：",
+    "存了几个故事当素材，今天拿出来说说：",
+]
+
 # 板块二的文案：不是一串标题，而是一段「像人写的帖子」。
 # 开头亮态度、中间把当天最像段子的几条串起来、结尾自己先表态再抛问题引讨论。
 # 底线：包装词都是通用套话，绝不给标题加戏——不能编事实。
@@ -305,7 +443,7 @@ _MARKS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩",
           "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉘", "㉙", "㉚"]
 
 
-def render_copy(items, site, now=None, top=25):
+def render_copy(items, site, now=None, top=25, stories=None):
     """板块二 X 文案：一篇帖子，不是三条。
 
     条目按 _sort_key 排（含段子度和排他性权重），不照抄榜一。
@@ -315,9 +453,24 @@ def render_copy(items, site, now=None, top=25):
     20 条左右就远超普通账号的 280 上限了——这是给 X Premium 长文或拆成串用的。
     """
     now = now or datetime.now()
-    picked = sorted(items, key=_sort_key)[:top]
     seed = now.toordinal()
 
+    if stories:
+        # 有故事就用故事：标题 + 首段摘要，这才是用户要的「内容」。
+        picked = stories[:top]
+        lines = [_STORY_OPENERS[seed % len(_STORY_OPENERS)], ""]
+        for i, st in enumerate(picked):
+            mark = _MARKS[i] if i < len(_MARKS) else f"{i + 1}."
+            lines.append(f"{mark} {st['title']}")
+            lines.append(f"\u3000{st['desc']}")        # 全角缩进，手机上不会跟标题粘成一行
+        lines.append("")
+        take = _TAKES[(seed * 3) % len(_TAKES)].format(n=_MARKS[seed % len(picked)])
+        lines.append(take)
+        lines.append(_ASKS[(seed * 5) % len(_ASKS)])
+        return "\n".join(lines)
+
+    # 没抓到故事时退回旧行为：拿榜单条目凑数（只有标题，信息量很薄）。
+    picked = sorted(items, key=_sort_key)[:top]
     lines = [_OPENERS[seed % len(_OPENERS)], ""]
     for i, it in enumerate(picked):
         mark = _MARKS[i] if i < len(_MARKS) else f"{i + 1}."
@@ -340,6 +493,9 @@ def main():
     ap.add_argument("--site", default=DEFAULT_SITE)
     ap.add_argument("--top", type=int, default=8)
     ap.add_argument("--copy-top", type=int, default=25, help="X 文案里列几条")
+    ap.add_argument("--story-top", type=int, default=12,
+                    help="从公众号故事里取几条（带正文，12 条已经比 25 条标题还长）")
+    ap.add_argument("--no-stories", action="store_true", help="不抓公众号故事，退回榜单标题")
     ap.add_argument("--handle", default="", help="卡片右下角署名，如 @your_x_handle")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
@@ -401,6 +557,32 @@ def main():
         assert "① " in copy and items[0]["title"] in copy, "条目没串进文案"
         assert any(a in copy for a in _ASKS), "结尾没抛问题引讨论"
         assert "http" not in copy and "#" not in copy, "文案里不该再有链接或话题标签"
+        # 故事正文：搜狗摘要是半角标点，还要能渲染成「标题 + 缩进正文」
+        assert _clean_text("彩礼给了,婚没结成.打了一年官司...") == "彩礼给了，婚没结成。打了一年官司…"
+        fake_html = ('<div class="txt-box"><h3><a href="/x">岳母彩礼涨价逼跑新郎</a></h3>'
+                     '<p class="txt-info">彩礼钱我和你爸出,不用你们还.</p></div>')
+        got = _SOGOU_PAT.findall(fake_html)
+        assert got and _clean_text(got[0][0]) == "岳母彩礼涨价逼跑新郎", got
+        stories = [{"title": "岳母彩礼涨价逼跑新郎", "desc": "彩礼钱我和你爸出，不用你们还。"}]
+        scopy = render_copy([], "https://example.com", stories=stories, top=5,
+                            now=datetime(2026, 9, 29, 8, 0))
+        assert "岳母彩礼涨价逼跑新郎" in scopy and "彩礼钱我和你爸出" in scopy, "故事正文没进文案"
+        assert "http" not in scopy and "#" not in scopy, "故事文案里不该有链接"
+        assert any(scopy.startswith(o) for o in _STORY_OPENERS), "故事开头没走轮换池"
+        assert _story_key({"title": "x", "desc": "彩礼" * 20}) < _story_key({"title": "y", "desc": "无关"}), \
+            "故事度排序没生效"
+        assert _story_ok("彩礼涨价了") is False, "太短的摘要不该算故事"
+        assert _story_ok("07 婆婆把房子留给她的事，胡莎早就知道") is False, "网文小节不该算故事"
+        assert _story_ok("总攻目标吹起冲锋号下面来自真实网友的相亲翻车经历仅供单身族群参考张裕自大学起接触电脑之后就成了这样一段没有任何标点的长句") is False, \
+            "没有标点的烂排版不该算故事"
+        assert _story_ok("近日有女顾客在专柜消费二十万，因赠品寄错引发争议，品牌已致歉。") is True
+        dup = [{"title": "彩礼涨价逼跑新郎", "desc": "d" * 40},
+               {"title": "彩礼又涨了", "desc": "d" * 40},
+               {"title": "彩礼谈崩了", "desc": "d" * 40},
+               {"title": "邻居装修吵翻天", "desc": "d" * 40}]
+        got2 = _pick_stories(dup, 3)
+        assert len(got2) == 3 and sum("彩礼" in s["title"] for s in got2) == 2, \
+            f"同题材没被压到 2 条：{[s['title'] for s in got2]}"
         # 换个日期应该换一套说法，不然天天一个味
         copy2 = render_copy(items, "https://example.com", now=datetime(2026, 9, 30, 8, 0))
         assert copy != copy2, "不同日期文案完全一样，等于没做变化"
@@ -424,9 +606,13 @@ def main():
     # 板块一：官方消息 -> 卡片图（飞书里的图）
     (out / "card.html").write_text(
         render_card(official, args.site, top=args.top, handle=handle), encoding="utf-8")
-    # 板块二：整份榜单 -> 纯文字（发 X 用）。段子度/排他性只管排序，
-    # 因为一篇要列几十条，光靠段子池（常常不到 10 条）凑不出来。
-    (out / "copy.txt").write_text(render_copy(items, args.site, top=args.copy_top), encoding="utf-8")
+    # 板块二：公众号故事 -> 纯文字（发 X 用）。正文来自搜狗微信，见 fetch_stories；
+    # 抓不到才退回榜单标题——那样只有标题，信息量和卡片图没区别。
+    stories = [] if args.no_stories else _pick_stories(fetch_stories(), args.story_top)
+    (out / "copy.txt").write_text(
+        render_copy(items, args.site,
+                    top=args.story_top if stories else args.copy_top,
+                    stories=stories), encoding="utf-8")
 
     print(f"板块一 官方·图  {len(official):>3} 条 -> {out/'card.html'}，取前 {args.top}")
     for i, it in enumerate(official[: args.top], 1):
@@ -434,9 +620,10 @@ def main():
     copy_text = (out / "copy.txt").read_text(encoding="utf-8")
     weighted = sum(2 if ord(c) > 127 else 1 for c in copy_text)
     warn = "（超 280，需要 Premium 长文或拆串）" if weighted > 280 else "（普通账号发得下）"
-    print(f"板块二 文案      {len(items):>3} 条 -> {out/'copy.txt'}，取前 {args.copy_top}"
+    src_note = f"公众号故事 {len(stories):>2} 条" if stories else "⚠️ 没抓到故事，退回榜单标题"
+    print(f"板块二 文案      {src_note} -> {out/'copy.txt'}，取前 {args.copy_top}"
           f"，加权 {weighted} 字符 {warn}")
-    for i, it in enumerate(sorted(items, key=_sort_key)[:args.copy_top], 1):
+    for i, it in enumerate((stories or sorted(items, key=_sort_key))[: args.copy_top], 1):
         print(f"  {i:>2}. {it['title'][:44]}")
 
 
