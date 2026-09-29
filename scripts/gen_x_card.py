@@ -62,7 +62,13 @@ def parse_items(report_html):
         title = html.unescape(re.sub(r"<[^>]+>", "", link.group(2))).strip()
         if len(title) < 4:
             continue
-        platforms = [html.unescape(p).strip() for p in _SOURCE_RE.findall(chunk)]
+        # 报告把同题的多平台并成一个 span，用 + 连接（如 "微博+知乎"），必须拆开，
+        # 否则每条都只有 1 个"平台"，共振优先排序和共振标签全部失效。
+        platforms = [
+            html.unescape(p).strip()
+            for raw in _SOURCE_RE.findall(chunk)
+            for p in raw.split("+")
+        ]
         platforms = [p for p in dict.fromkeys(platforms) if p]
         if not platforms:
             continue  # 独立展示区/RSS 段没有平台归属，不属于热榜卡片
@@ -138,7 +144,10 @@ def render_card(items, site, now=None, top=8, handle=""):
 
     rows = []
     for i, it in enumerate(picked, 1):
-        tags = [_tag("", p) for p in it["platforms"]]
+        # 平台名合成一个标签：逐平台一个标签会挤成 8~11 个，太长还会换行把下面
+        # 的徽章顶到第二行。只列前 3 个，数量交给「多平台共振 ×N」表达。
+        names = it["platforms"]
+        tags = [_tag("", "+".join(names[:3]) + (" 等" if len(names) > 3 else ""))]
         if len(it["platforms"]) > 1:
             tags.append(_tag("hot", f"多平台共振 ×{len(it['platforms'])}"))
         if it["rank"] < 9999:
@@ -203,6 +212,19 @@ def main():
         card2 = render_card(demo, args.site, handle="@demo")
         assert "多平台共振 ×2" in card2, "多平台共振标签没渲染"
         assert "↑ 上升" in card2 and "3次" in card2, "涨跌/次数标签没渲染"
+        long3 = [{"title": "测试条目", "url": "https://example.com",
+                  "platforms": ["甲", "乙", "丙", "丁", "戊"], "rank": 9, "trend": "", "count": ""}]
+        card3 = render_card(long3, args.site, handle="@demo")
+        assert "甲+乙+丙 等" in card3 and "丁" not in card3, "长平台列表没截断"
+        # 报告是多平台合并成一个 span（+ 连接），这条守住解析不再退化成 1 个平台
+        joined = parse_items(
+            '<div class="news-item"><span class="source-name">微博+知乎+抖音</span>'
+            '<a href="https://e.com/x" class="news-link">测试标题四个字</a></div>'
+        )
+        assert joined and joined[0]["platforms"] == ["微博", "知乎", "抖音"], (
+            "多平台合并的 source-name 没拆开",
+            joined and joined[0]["platforms"],
+        )
         assert "完整榜单" in render_copy(items, args.site)
         print(f"selftest OK — {len(items)} 条，首条：{items[0]['title'][:26]} "
               f"{items[0]['platforms']} 第{items[0]['rank']}位 "
