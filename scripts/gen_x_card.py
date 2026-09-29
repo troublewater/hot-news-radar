@@ -129,7 +129,7 @@ font-size:28px;font-weight:800;color:#0b1020}
 .tag.up{color:#5ee08a;border-color:rgba(94,224,138,.45)}
 .tag.down{color:#ff8f8f;border-color:rgba(255,143,143,.45)}
 footer{border-top:1px solid rgba(255,255,255,.14);padding-top:20px;display:flex;
-justify-content:space-between;font-size:20px;color:#6f7da6;letter-spacing:1px}
+justify-content:flex-end;font-size:20px;color:#6f7da6;letter-spacing:1px}
 """
 
 
@@ -170,7 +170,7 @@ def render_card(items, site, now=None, top=8, handle=""):
 <div class="meta"><span>{now.strftime('%Y.%m.%d')} {WEEKDAY[now.weekday()]}</span>
 <span>{len(picked)} 条精选 · 共振 <b>{resonant}</b> 条</span></div></header>
 <ul>{''.join(rows)}</ul>
-<footer><span>11 个国内热榜 + 8 个国际 RSS</span><span>{html.escape(handle)}</span></footer>
+<footer><span>{html.escape(handle)}</span></footer>
 </body></html>
 """
 
@@ -240,7 +240,7 @@ def main():
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    handle = args.handle or ("@" + args.site.split("//")[-1].split(".")[0])
+    handle = args.handle or "@DrAnswerMe"
     (out / "card.html").write_text(render_card(items, args.site, top=args.top, handle=handle), encoding="utf-8")
     (out / "copy.txt").write_text(render_copy(items, args.site), encoding="utf-8")
     print(f"卡片已生成：{out/'card.html'}（{len(items)} 条候选，取前 {args.top}）")
