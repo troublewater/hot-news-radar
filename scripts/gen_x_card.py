@@ -25,6 +25,7 @@
 
 import argparse
 import html
+import http.cookiejar
 import json
 import os
 import re
@@ -285,11 +286,29 @@ def render_card(items, site, now=None, top=8, handle=""):
 # 榜单接口每条只有 id/title/url，没有正文，所以「标题 + 内容」里的内容只能另找。
 # 搜狗微信是唯一免登录、还能同时拿到「标题 + 文章首段摘要」的公众号入口；
 # 已实测 GitHub runner（美国机房）可直连。知乎热榜从 CI 过去是 403，别再试。
-# 三组：文章链接、标题、首段摘要。链接是搜狗的跳转地址，带时效，
-# 但在浏览器里能打开原文章，给用户二创时看全文用。
+def _abs_sogou(href):
+    """搜狗吐出来的 href 里带空格（搜索词里有空格时），不编码直接请求会报 InvalidURL。"""
+    return "https://weixin.sogou.com" + re.sub(r"\s+", "%20", html.unescape(href))
+
+
+# 三组：文章链接、标题、首段摘要。链接只是跳板，正文补全会换成正主地址。
 _SOGOU_PAT = re.compile(
     r'(?s)<div class="txt-box">.*?<h3>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
     r'<p class="txt-info"[^>]*>(.*?)</p>')
+
+# 用户要的是「脑洞大开」，不是「儿女情长」。两组词各轮一半，
+# 光靠排序调不动配比——池子里本来就是家长里短多，得从搜索词源头掰。
+_STORY_WEIRD = [
+    "我有一个朋友", "细思极恐", "社死 现场", "离谱 经历", "万万没想到",
+    "神操作", "整活 翻车", "奇葩 室友", "奇葩 同事", "反转 故事",
+    "AI 整活", "程序员 翻车", "买家秀 翻车", "迷惑 行为",
+]
+
+# 争议/对比：用户点名要的「AMD 和 Intel」那一类，吵得起来的题目
+_STORY_FIGHT = [
+    "AMD Intel", "苹果 安卓", "预制菜", "国产 进口", "AI 取代",
+    "电车 油车", "小米 华为", "学历 贬值",
+]
 
 # 按天轮换，一次只问 12 个：搜狗按 IP 限流，一口气问太多会被拉黑。
 _STORY_KEYWORDS = [
@@ -311,14 +330,35 @@ _THEME_WORDS = [
     "网购", "快递", "外卖", "手机", "游戏",
 ]
 
-# 故事感强的题材：讲钱、讲亲戚、讲婚姻的，才是这个板块要的东西
+# 上面这些里属于「儿女情长婚嫁」的，单独算配额
+_FAMILY_WORDS = {
+    "彩礼", "嫁妆", "相亲", "订婚", "退婚", "离婚", "出轨", "前任", "婚闹",
+    "婆婆", "公公", "大姑", "小姑", "小叔", "舅子", "扶弟", "月子", "婆媳",
+    "份子钱", "随礼",
+}
+
+# 脑洞/离谱/反转：用户点名要这一类，排序上给最高优先
+_STORY_FUN = re.compile(
+    r"脑洞|离谱|奇葩|沙雕|神操作|骚操作|反转|万万没想到|整活|笑死|抽象|逆天|绝了|"
+    r"赛博|科幻|黑客|脑回路|迷惑|破防|离奇|魔幻|神评|细思极恐|社死|"
+    r"我(有)?一个朋友")
+
+# 婚嫁家事：这类够多了，排序往后放，配额也单独卡
 _STORY_HOT = re.compile(
     r"彩礼|嫁妆|婆婆|公公|大姑|小姑|小叔|舅子|扶弟|婚闹|相亲|订婚|退婚|离婚|出轨|"
     r"房子|房产|加名|工资|存款|借钱|份子钱|月子|学区房|法院|起诉|报警")
 
 # 连载小说、引流广告都不是真事，别混进帖子里
-_STORY_NOISE = re.compile(r"（上）|（下）|\(上\)|\(下\)|第[一二三四五六七八九十\d]+章|合集|推荐阅读|点击阅读原文|推荐上集|上集阅读|下集阅读|未完待续")
-_STORY_AD = re.compile(r"个人微信|微信号|加我微信|扫码关注|点击上方")
+# 盘点/大赏是「一年沙雕新闻合集」那种二手汇编，不是单个故事，混进来全是陈年旧闻
+_STORY_NOISE = re.compile(
+    r"（上）|（下）|\(上\)|\(下\)|第[一二三四五六七八九十\d]+章|合集|推荐阅读|点击阅读原文|"
+    r"推荐上集|上集阅读|下集阅读|未完待续|盘点|大赏|年度|十大|榜单|图集|网友直呼")
+_STORY_AD = re.compile(
+    r"个人微信|微信号|加我微信|扫码关注|点击上方|淡斑|祛斑|减肥|瘦身|养生|偏方|根治|特效|包邮|"
+    r"㎡|洋房|楼盘|户型|首付|总价|样板间")
+# 标题里带这些的，正文写得再像样也是「一整年沙雕新闻合集」或软广，不是单个故事
+_STORY_NOISE_TITLE = re.compile(
+    r"沙雕|奇葩新闻|盘点|大赏|出炉|来袭|年度|十大|榜单|图集|^\d{4}年")
 # 百科词条式的开头（「彩礼，中国旧时婚礼程序之一」）不是故事
 _STORY_WIKI = re.compile(r".{0,16}(又称|也称|是一种|是指|释义)")
 
@@ -342,27 +382,131 @@ def _clean_text(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _get(url, timeout=25):
+_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+    "Accept-Language": "zh-CN,zh;q=0.9",
+}
+
+# 搜狗给的是带会话的跳转链：先访问搜索页拿到 SNUID，再去换真实地址，
+# 否则跳转页直接回验证码。整个流程共用一个 opener 就够了。
+_COOKIES = http.cookiejar.CookieJar()
+_OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_COOKIES))
+
+
+def _get(url, timeout=25, referer=""):
     """抓不到就返回空串——单个源挂了不该让整条流水线跟着挂。"""
-    req = urllib.request.Request(url, headers={
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "zh-CN,zh;q=0.9",
-    })
+    headers = dict(_HEADERS)
+    if referer:
+        headers["Referer"] = referer
+    req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", "ignore")
     except Exception as exc:  # noqa: BLE001 - 单个源失败不该中断整轮
         print(f"  ⚠️ 抓取失败 {url[:56]}：{type(exc).__name__}: {exc}")
         return ""
 
 
+# ── 公众号正文 ────────────────────────────────────────────────────────
+# 搜狗只给一百来字的摘要，还从半句中间切（读起来就是用户说的「断章取义」）。
+# 但它的跳转页里藏着真实文章地址，只是被 JS 拆成小段防爬；拼回来就能打开原文，
+# 从正文容器里取出从开头连续的几段。实测这条路走得通。
+_ARTICLE_HEAD = re.compile(r"转自|公众号|点击上方|关注我们|来源[:：]|作者[:：]|微信号|阅读原文")
+_ARTICLE_CHARS = 420                               # 取多少字：两三个自然段，再多就是搬运了
+_HEAD_END = "）)▼】」"
+
+
+def _wechat_url_from(page):
+    """跳转页里 url 是一段段 += 拼起来的，拼回来。"""
+    return "".join(re.findall(r"url \+= '([^']*)'", page))
+
+
+def _wechat_url(sogou_url):
+    return _wechat_url_from(_get(sogou_url, referer="https://weixin.sogou.com/"))
+
+
+def _strip_article_head(text):
+    """正文开头常是「本文转自公众号：xxx （ID：xxx）」，整句去掉。
+
+    这些前言经常和正文粘在同一句里（中间没有句号），所以先在首句里截一刀。
+    """
+    sents = [x.strip() for x in re.split(r"(?<=[。！？…])", text) if x.strip()]
+    while sents and _ARTICLE_HEAD.search(sents[0]):
+        first = sents[0]
+        cut = max(first.rfind(c) for c in _HEAD_END)
+        if 0 < cut < len(first) - 6:               # 前言和正文粘在一起，从标记后面接着读
+            sents[0] = first[cut + 1:].strip()
+            break
+        sents.pop(0)
+    return "".join(sents)
+
+
+def _cut_sentences(text, chars=_ARTICLE_CHARS):
+    """按整句截断。从半句中间切就是「断章取义」，宁可少几个字。"""
+    out = ""
+    for sent in re.split(r"(?<=[。！？…])", text):
+        if out and len(out) + len(sent) > chars:
+            break
+        out += sent
+    return out or text[:chars]
+
+
+_ARTICLE_BYTES = 1_200_000          # 正文容器在 500 KB 附近，读 400 KB 会正好切掉
+
+
+def fetch_article(url, chars=_ARTICLE_CHARS):
+    """公众号正文。文章页 3 MB 起（前半是脚本和样式），读到正文容器就够。"""
+    headers = dict(_HEADERS)
+    headers["Referer"] = "https://weixin.sogou.com/"
+    try:
+        with _OPENER.open(urllib.request.Request(url, headers=headers), timeout=25) as resp:
+            raw = resp.read(_ARTICLE_BYTES).decode("utf-8", "ignore")
+    except Exception as exc:  # noqa: BLE001 - 抓不到就退回摘要
+        print(f"  ⚠️ 正文抓取失败 {url[:48]}：{type(exc).__name__}: {exc}")
+        return ""
+    raw = re.sub(r"(?s)<section[^>]*display\s*:\s*none.*?</section>", " ", raw)   # 编辑器工具条
+    block = re.search(r'(?s)id="js_content"[^>]*>(.*?)</div>\s*<div', raw)
+    if not block:
+        return ""
+    return _cut_sentences(_strip_article_head(
+        _clean_text(re.sub(r"<[^>]+>", " ", block.group(1)))), chars)
+
+
+def enrich_fulltext(stories, chars=_ARTICLE_CHARS):
+    """把公众号素材换成原文正文；抓不到就保留摘要，不算失败。"""
+    got = 0
+    for st in stories:
+        if st.get("src") != "公众号" or not st.get("url"):
+            continue
+        real = _wechat_url(st["url"])
+        if not real:                               # 连着换十几次地址会被限流，歇一下再来一遍
+            time.sleep(3)
+            real = _wechat_url(st["url"])
+        body = fetch_article(real, chars) if real else ""
+        if body:
+            st["desc"] = body
+            st["url"] = real                       # 换成正主地址，搜狗那个跳转是有时效的
+            got += 1
+        time.sleep(0.4)                            # 别把搜狗和微信惹毛
+    print(f"  正文补全：{got}/{len(stories)} 条拿到原文")
+    return stories
+
+
 def fetch_stories(keywords=None, now=None, limit=12, per_keyword=6):
     """搜狗微信 -> [{'title','desc'}]。抓不到返回 []，调用方回退到榜单标题。"""
     now = now or datetime.now()
-    kws = list(keywords or _STORY_KEYWORDS)
-    start = (now.toordinal() * 3) % len(kws)          # 每天换一批词，顺带避开限流
-    kws = (kws + kws)[start:start + limit]
+    if keywords:
+        kws = list(keywords)
+    else:
+        # 每天换一批词（顺带避开限流）；三组用不同步长取，免得天天同一套组合。
+        # 家事从主力降成补充——池子里本来就家长里短最多，用户要的是段子。
+        pools = [(_STORY_WEIRD, round(limit * 0.4)), (_STORY_FIGHT, round(limit * 0.3))]
+        pools.append((_STORY_KEYWORDS, limit - sum(n for _, n in pools)))
+        kws = []
+        for i, (pool, n) in enumerate(pools):
+            start = (now.toordinal() * (3 + 2 * i)) % len(pool)
+            kws += (pool + pool)[start:start + n]
 
     stories, seen = [], set()
     for kw in kws:
@@ -371,13 +515,15 @@ def fetch_stories(keywords=None, now=None, limit=12, per_keyword=6):
             continue
         for href, raw_title, raw_desc in _SOGOU_PAT.findall(page)[:per_keyword]:
             title, desc = _clean_text(raw_title), _clean_text(raw_desc)
-            if not desc or title in seen:
+            if not desc or title in seen or "\ufffd" in title:
                 continue
-            if _STORY_NOISE.search(title) or _STORY_AD.search(desc) or not _story_ok(desc):
+            if (_STORY_NOISE.search(title) or _STORY_NOISE_TITLE.search(title)
+                    or _STORY_AD.search(title) or _STORY_AD.search(desc)
+                    or not _story_ok(desc)):
                 continue
             seen.add(title)
             stories.append({"title": title, "desc": desc, "src": "公众号",
-                            "url": "https://weixin.sogou.com" + html.unescape(href)})
+                            "kw": kw, "url": _abs_sogou(href)})
         time.sleep(1.5)                               # 搜狗按 IP 限流，问太快会被拦
     return stories
 
@@ -387,7 +533,7 @@ _HUPU_LIST = "https://bbs.hupu.com/bxj"
 _HUPU_BODY = re.compile(r'(?s)class="thread-content-detail">(.*?)</div>')
 
 
-def _paragraphs(text, budget=52, max_par=4):
+def _paragraphs(text, budget=52, max_par=6):
     """切成「一到三行一段」的短段落。
 
     这是那条爆帖的精髓：句子短、段与段之间空一行，读起来有呼吸感。
@@ -499,7 +645,7 @@ def fetch_tieba(limit=3):
 
 def collect_stories(top):
     """汇总三个源并按题材去重。交错着取，免得一个源把另一个挤没。"""
-    groups = [fetch_stories(), fetch_hupu(limit=4), fetch_tieba(limit=2)]
+    groups = [fetch_stories(), fetch_hupu(limit=12, probe=24), fetch_tieba(limit=3)]
     pool = []
     for i in range(max((len(x) for x in groups), default=0)):
         pool += [x[i] for x in groups if i < len(x)]
@@ -529,17 +675,29 @@ def _pick_stories(stories, top):
 
     宁可要 25 条不重样的，也不要 30 条里六七条都是份子钱。
     """
+    family_budget = max(3, top // 4)               # 婚嫁家事最多占四分之一
     ordered, picked, taken = sorted(stories, key=_story_key), [], set()
+    used, family_used = {}, 0
     for cap in (2, 3, 4):
-        used = {}
         for idx, st in enumerate(ordered):
             if idx in taken:
                 continue
             theme = next((w for w in _THEME_WORDS if w in st["title"]), "")
+            if theme and used.get(theme, 0) >= cap:
+                continue                       # 没归上类的不卡，否则虎扑的帖子全被挤掉
+            # 同一个搜索词翻出来的东西天然是一个题材（「AI 整活」一次能出五条），
+            # 按词再卡一道，光靠题材词表堵不住。
+            kw = "kw:" + st["kw"] if st.get("kw") else ""
+            if kw and used.get(kw, 0) >= cap:
+                continue
+            if theme in _FAMILY_WORDS:
+                if family_used >= family_budget:
+                    continue
+                family_used += 1
             if theme:
-                if used.get(theme, 0) >= cap:
-                    continue                   # 没归上类的不卡，否则虎扑的帖子全被挤掉
                 used[theme] = used.get(theme, 0) + 1
+            if kw:
+                used[kw] = used.get(kw, 0) + 1
             taken.add(idx)
             picked.append(st)
             if len(picked) >= top:
@@ -548,11 +706,17 @@ def _pick_stories(stories, top):
 
 
 def _story_key(s):
-    """故事度：讲钱讲亲戚的优先；摘要太短没内容、太长读不完的都压一压。"""
+    """排序：脑洞/离谱/反转的排前面，婚嫁家事的往后放。
+
+    之前按 _STORY_HOT（彩礼婆婆那一套）加权，结果前排全是家长里短；
+    用户要的是脑洞，所以反过来：脑洞优先，婚嫁只做减法。
+    """
+    text = s["title"] + s["desc"]
+    fun = 0 if _STORY_FUN.search(text) else 1
+    family = 1 if _STORY_HOT.search(text) else 0
     n = len(s["desc"])
-    juicy = 0 if _STORY_HOT.search(s["title"] + s["desc"]) else 1
     short = 0 if n >= 80 else (80 - n) // 20 + 1     # 正文长是好事，只有太短才扣分
-    return (juicy, short)
+    return (fun, family, short)
 
 
 # 单条开火用的钩子：一条帖子只讲一个故事，「第 N 条」那种说法用不上。
@@ -774,15 +938,28 @@ def main():
         hcopy = render_pool(hupu, top=1, now=datetime(2026, 9, 29, 8, 0))
         assert "网友：第一条回复" in hcopy and "网友：第二条回复" in hcopy, "热评没单独成段"
         assert "\n\n" in hcopy, "段落之间没有空行，不是隔断式"
+        # 正文补全：搜狗跳转页里真实地址是 JS 拼的；前言要能从首句里切掉
+        fake_js = ("<script>var url='';url += 'https://mp.';url += 'weixin.qq.c';"
+                   "url += 'om/s?src=11';</script>")
+        assert _wechat_url_from(fake_js) == "https://mp.weixin.qq.com/s?src=11", _wechat_url_from(fake_js)
+        assert _strip_article_head("本文转自公众号：路上读书 （ID：x） ▼ 这几天都在追剧。第二句。") \
+            == "这几天都在追剧。第二句。"
+        assert _cut_sentences("第一句。第二句。第三句。", chars=10) == "第一句。第二句。", \
+            _cut_sentences("第一句。第二句。第三句。", chars=10)
+        assert _story_key({"title": "脑洞故事", "desc": "d" * 100}) \
+            < _story_key({"title": "彩礼纠纷", "desc": "d" * 100}), "脑洞没排在婚嫁前面"
         assert "你刷到哪条" not in scopy and "这几条" not in scopy, "单条素材不该用「几选一」的口气提问"
         assert any(a in scopy for a in _ASK_ONE), "单条素材没带追问"
         assert _story_ok("彩礼，中国旧时婚礼程序之一，又称财礼、聘礼等。") is False, "百科词条不算故事"
+        # 标题层：整年合集和软广，正文再像样也得拦在门外
+        assert _STORY_NOISE_TITLE.search("2019年最后的沙雕新闻正式出炉！"), "年度合集没在标题层被拦"
+        assert _STORY_AD.search("万万没想到，手指上竟然隐藏着这个淡斑开关"), "标题里的软广没被拦"
         assert scopy.count("-" * 18) == 1, "两条之间应该正好一条分隔线"
         ssrc = render_sources(stories, now=datetime(2026, 9, 29, 8, 0))
         assert "二创素材" in ssrc and "https://example.com/a" in ssrc, "素材文件没带原文链接"
         assert render_pool([], top=5).strip() == "", "空素材不该吐东西"
-        assert _story_key({"title": "x", "desc": "彩礼" * 20}) < _story_key({"title": "y", "desc": "无关"}), \
-            "故事度排序没生效"
+        assert _story_key({"title": "彩礼纠纷", "desc": "d" * 100}) \
+            > _story_key({"title": "无关故事", "desc": "d" * 100}), "婚嫁家事没被排到后面"
         assert _story_ok("彩礼涨价了") is False, "太短的摘要不该算故事"
         assert _story_ok("07 婆婆把房子留给她的事，胡莎早就知道") is False, "网文小节不该算故事"
         assert _story_ok("总攻目标吹起冲锋号下面来自真实网友的相亲翻车经历仅供单身族群参考张裕自大学起接触电脑之后就成了这样一段没有任何标点的长句") is False, \
@@ -795,6 +972,12 @@ def main():
         got2 = _pick_stories(dup, 3)
         assert len(got2) == 3 and sum("彩礼" in s["title"] for s in got2) == 2, \
             f"同题材没被压到 2 条：{[s['title'] for s in got2]}"
+        # 同一个搜索词翻出来的东西天然同题材，按词再卡一道
+        dupkw = [{"title": f"AI整活第{i}条", "desc": "d" * 40, "kw": "AI 整活"} for i in range(4)]
+        dupkw.append({"title": "无关的一条帖子", "desc": "d" * 40})
+        got3 = _pick_stories(dupkw, 3)
+        assert len(got3) == 3 and sum(x.get("kw") == "AI 整活" for x in got3) == 2, \
+            f"同一个搜索词的素材没被限流：{[x['title'] for x in got3]}"
         # 换个日期应该换一套说法，不然天天一个味
         copy2 = render_copy(items, "https://example.com", now=datetime(2026, 9, 30, 8, 0))
         assert copy != copy2, "不同日期文案完全一样，等于没做变化"
@@ -821,6 +1004,8 @@ def main():
     # 板块二：故事素材池 -> 每条单独发。正文来自 collect_stories（公众号 / 虎扑 / 贴吧）；
     # 抓不到才退回榜单标题——那样只有标题，信息量和卡片图没区别。
     stories = [] if args.no_stories else collect_stories(args.story_top)
+    if stories:
+        enrich_fulltext(stories)
     (out / "copy.txt").write_text(
         render_pool(stories, top=args.story_top) if stories
         else render_copy(items, args.site, top=args.copy_top), encoding="utf-8")
