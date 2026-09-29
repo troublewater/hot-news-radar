@@ -391,6 +391,9 @@ def _hupu_material(detail):
     for raw in _HUPU_BODY.findall(detail):
         # </p> 之间没有换行，直接去标签会把整篇糊成一行
         text = _clean_text(re.sub(r"</p>", " ", raw))
+        # 属性值里带 > 时，去标签会留下半截 href="..."，这种块整块不要
+        if "href=" in text or 'target="_blank"' in text:
+            continue
         if len(text) >= 6 and text not in seen:
             seen.add(text)
             blocks.append(text)
@@ -400,22 +403,32 @@ def _hupu_material(detail):
     return first + (" 热评：" + " ｜ ".join(replies) if replies else "")
 
 
-def fetch_hupu(limit=4, probe=8):
-    """步行街列表 -> 前几个帖子的首帖 + 热评。素材太短的（水贴）直接丢。"""
+# 列表行自带「回复 / 浏览」，按回复数挑热的抓，命中率比顺着列表抓高得多：
+# 一千多条里绝大多数首帖只有一句话，热闹的帖子才有人把前因后果写出来。
+_HUPU_ROW = re.compile(
+    r'(?s)<div class="post-title">\s*<a href="(/\d+\.html)"[^>]*>(.*?)</a>.*?'
+    r'<div class="post-datum">\s*(\d+)\s*/\s*(\d+)\s*</div>')
+
+
+def fetch_hupu(limit=4, probe=12):
+    """步行街列表 -> 回复最多的几个帖子的首帖 + 热评。素材太短的（水贴）直接丢。"""
     page = _get(_HUPU_LIST)
     if not page:
         return []
-    seen, out = set(), []
-    for href, raw in re.findall(r'(?s)<a href="(/\d+\.html)"[^>]*>(.*?)</a>', page):
+    rows = []
+    for href, raw, replies, _views in _HUPU_ROW.findall(page):
         title = _clean_text(raw)
-        if len(title) < 8 or href in seen:
+        if len(title) < 8:
+            continue
+        rows.append((int(replies), href, title))
+    seen, out = set(), []
+    for _replies, href, title in sorted(rows, reverse=True)[:probe]:
+        if href in seen:
             continue
         seen.add(href)
-        if len(seen) > probe:
-            break
         detail = _get("https://bbs.hupu.com" + href)
         body = _hupu_material(detail) if detail else ""
-        if len(body) < 60:
+        if len(body) < 50:
             continue
         out.append({"title": title, "desc": body[:600], "src": "虎扑步行街",
                     "url": "https://bbs.hupu.com" + href})
