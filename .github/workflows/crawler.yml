@@ -246,6 +246,14 @@ jobs:
           test -s docs/x/card.png || { echo "❌ 卡片截图失败：Chrome 说成功但没写出 PNG"; exit 1; }
           ls -lh docs/x/
 
+      # ── 侦察：runner（美国）能不能直连中文站点 ───────────────
+      # 下一步要从微信公众号 / 虎扑拿段子正文，先确认网络路径通不通。
+      # 侦察失败不应该弄坏正常出报告，所以 continue-on-error。
+      - name: Probe Chinese sources
+        if: success()
+        continue-on-error: true
+        run: python3 scripts/probe_cn.py
+
       # ── 提交到 reports 分支（Pages 发布源）─────────────────────────────
       # Pages 现在从 reports 分支根目录读取，这一步就是网站的发布动作。
       #
