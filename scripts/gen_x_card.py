@@ -888,9 +888,10 @@ _AI_SYSTEM = """你在给一个中文社媒账号写「话题小故事」。账�
 8. 不要 emoji，不要 #话题标签，不要小标题，不要序号。
 9. 绝对不许复用范文里的人、事、数字，范文只示范写法。
 
-最后一段是全文的落点，必须是「一句看透这件事的话」：可以稍微夸大，但要从前面的事实里推得出来，像人琢磨明白之后随口说的一句。
+最后一段是全文的落点：一句贴着这件事的冷峻判断，可以稍微夸大，但要能从前面的细节里推出来。
+自检：那句话如果换成别的故事也成立，就是废话，重写。
 落点写得好的例子：职场上暗流涌动，传到你耳朵里的秘密，可能全公司只有你还蒙在鼓里。
-落点写得差的例子（禁止这么写）：这些小秘密，让我对这个职场有了更深的了解。——空、牵强，等于什么都没说。"""
+落点写得差的例子（一律禁止）：这些小秘密，让我对这个职场有了更深的了解。／科技竞争的本质不是企业间的对抗，而是创造者们对真理的执着追求。——这种放到哪儿都成立的人生道理，等于什么都没说。"""
 
 _AI_FEWSHOT = """范文一：
 这场婚姻，73天就谈到了1500万。
@@ -1007,22 +1008,29 @@ def _ai_call(key, base, model, system, user):
         base + "/chat/completions", data=body, method="POST",
         headers={**_HEADERS, "Authorization": "Bearer " + key,
                  "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=_AI_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8", "ignore"))
-        return data["choices"][0]["message"]["content"]
-    except Exception as exc:                     # noqa: BLE001 - 模型挂了就退回抽取式素材
-        print(f"  ⚠️ AI 改写失败：{type(exc).__name__}: {exc}")
-        return ""
+    for attempt in (1, 2):                        # 429/超时多半是抖动，隔几秒再来一次
+        try:
+            with urllib.request.urlopen(req, timeout=_AI_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8", "ignore"))
+            return data["choices"][0]["message"]["content"]
+        except Exception as exc:                 # noqa: BLE001 - 模型挂了就退回原贴
+            if attempt == 2:
+                print(f"  ⚠️ AI 改写失败：{type(exc).__name__}: {exc}")
+                return ""
+            time.sleep(6)
+    return ""
 
 
 def _normalize_quotes(text):
-    """模型爱用英文直引号（\"…\"），中文里看着别扭，成对换成 “”。"""
-    out, opening = [], True
+    """模型爱用英文直引号（"…" / '…'），中文里看着别扭，成对换成 “” 和 ‘’。
+
+    成对替换靠奇偶交替，不依赖模型自己配对（它一向配得很随意）。
+    """
+    out, opening = [], {"\"": True, "'": True}
     for ch in text:
-        if ch == "\"":
-            out.append("“" if opening else "”")
-            opening = not opening
+        if ch in opening:
+            out.append(({"\"": "“", "'": "‘"} if opening[ch] else {"\"": "”", "'": "’"})[ch])
+            opening[ch] = not opening[ch]
         else:
             out.append(ch)
     return "".join(out)
@@ -1400,6 +1408,7 @@ def main():
         assert _ai_parse("好的：\n```json\n[{\"title\": \"T\", \"paras\": [\"a\", \"b\"]}]\n```").__len__() == 1
         assert _ai_parse("不听话，没有 JSON") == []
         assert _normalize_quotes('他说"行"就走了') == '他说“行”就走了', _normalize_quotes('他说"行"就走了')
+        assert _normalize_quotes("他嫌'杂牌'不好") == "他嫌‘杂牌’不好", _normalize_quotes("他嫌'杂牌'不好")
         # 撞输出上限被截断时，完整的那几条要能捞出来
         cut = _ai_parse('[{"title":"A","paras":["a1"]},{"title":"B","paras":["b1"]},{"title":"C","par')
         assert [x["title"] for x in cut] == ["A", "B"], cut
