@@ -855,7 +855,7 @@ _MARKS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩",
 # key / base / model 沿用仓库已有的 AI_* 配置（用户已在 Secrets 里配好）。
 _AI_BASE = "https://open.bigmodel.cn/api/paas/v4"
 _AI_MODEL = "glm-4-flash"
-_AI_BATCH = 8                    # 一次要 8 条：要 30 条得拆几次，题目太长会越写越水
+_AI_BATCH = 4                    # 一次 4 条：一次要太多会撞输出上限，JSON 被截断就整批作废
 _AI_TIMEOUT = 180
 
 # 钩子话题：热搜标题里出现这些词，就是「有故事 / 能吵起来」的题
@@ -953,14 +953,31 @@ def _ai_call(key, base, model, system, user):
 
 
 def _ai_parse(text):
-    """模型爱加说明和 ```json 围栏，只抠出那个 JSON 数组。"""
-    m = re.search(r"\[.*\]", text or "", re.S)
-    if not m:
-        return []
-    try:
-        data = json.loads(m.group(0))
-    except ValueError:
-        return []
+    """模型爱加说明、```json 围栏，还可能写到一半被输出上限截断。
+
+    所以不留着 json.loads 一把梭：先找数组起点，再逐个对象 raw_decode，
+    完整的那几条照样能用，被截断的尾巴丢掉。
+    """
+    text = text or ""
+    start = text.find("[")
+    data = []
+    if start >= 0:
+        try:
+            data = json.loads(text[start:])          # 正常情况：一次到底
+        except ValueError:
+            dec = json.JSONDecoder()
+            pos = start + 1
+            while True:
+                nxt = text.find("{", pos)
+                if nxt < 0:
+                    break
+                try:
+                    obj, end = dec.raw_decode(text[nxt:])
+                except ValueError:
+                    pos = nxt + 1
+                    continue
+                data.append(obj)
+                pos = nxt + end
     out = []
     for it in data if isinstance(data, list) else []:
         if not isinstance(it, dict):
@@ -1244,6 +1261,9 @@ def main():
         # AI 改编：解析要能扛住模型加说明 / 套 ```json 围栏
         assert _ai_parse("好的：\n```json\n[{\"title\": \"T\", \"paras\": [\"a\", \"b\"]}]\n```").__len__() == 1
         assert _ai_parse("不听话，没有 JSON") == []
+        # 撞输出上限被截断时，完整的那几条要能捞出来
+        cut = _ai_parse('[{"title":"A","paras":["a1"]},{"title":"B","paras":["b1"]},{"title":"C","par')
+        assert [x["title"] for x in cut] == ["A", "B"], cut
         assert _ai_parse('[{"title":"只有标题"}]') == []
         ai_st = {"title": "开场钩子", "desc": "第一段。\n\n第二段。", "ai": True, "src": "AI 改编", "url": ""}
         apool = render_pool([ai_st], top=1, now=datetime(2026, 9, 30, 8, 0))
