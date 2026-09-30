@@ -541,8 +541,8 @@ def fetch_stories(keywords=None, now=None, limit=12, per_keyword=6):
 # 虎扑步行街：段子和争议故事的老窝，帖子页有完整首帖正文，值几次请求。
 _HUPU_LIST = "https://bbs.hupu.com/bxj"
 _HUPU_BODY = re.compile(r'(?s)class="thread-content-detail">(.*?)</div>')
-# 虎扑官方活动帖（发帖赢好礼那一套）是运营广告，不是网友故事
-_HUPU_PROMO = re.compile(r"活动正式开启|赢官方|官方好礼|带话题发贴|名额|速来|点击报名")
+# 虎扑、贴吧的官方活动帖（发帖赢好礼那一套）是运营广告，不是网友故事
+_PROMO = re.compile(r"活动正式开启|赢官方|官方好礼|带话题发贴|名额|速来|点击报名")
 
 
 def _paragraphs(text, budget=52, max_par=6):
@@ -620,7 +620,7 @@ def fetch_hupu(limit=4, probe=12):
         seen.add(href)
         detail = _get("https://bbs.hupu.com" + href)
         body, replies = _hupu_material(detail) if detail else ("", [])
-        if len(body) < 60 or _HUPU_PROMO.search(title + body):
+        if len(body) < 60 or _PROMO.search(title + body):
             # 前者：首帖没正文，剩下的热评没头没尾。后者：官方活动广告
             continue
         out.append({"title": title, "desc": body, "replies": replies,
@@ -647,7 +647,7 @@ def fetch_tieba(limit=3):
     for row in rows[: limit * 3]:
         title = _clean_text(row.get("topic_name", ""))
         desc = _clean_text(row.get("abstract") or row.get("topic_desc") or "")
-        if not title or not _story_ok(desc):
+        if not title or not _story_ok(desc) or _PROMO.search(title + desc):
             continue
         out.append({"title": title, "desc": desc, "src": "百度贴吧",
                     "url": row.get("topic_url", "")})
@@ -930,7 +930,7 @@ def main():
         assert "x-oss-process" not in _clean_text(
             "网友：这6次1次没高潮 /quality/50/ignore-error/1?x-oss-process=image/resize,w_225\"/>"), \
             "热评里的图片标签残渣没洗干净"
-        assert _HUPU_PROMO.search("「国庆回血计划」活动正式开启！"), "虎扑活动广告没被拦"
+        assert _PROMO.search("「国庆回血计划」活动正式开启！"), "官方活动广告没被拦"
         fake_html = ('<div class="txt-box"><h3><a href="/link?url=abc">岳母彩礼涨价逼跑新郎</a></h3>'
                      '<p class="txt-info">彩礼钱我和你爸出,不用你们还.</p></div>')
         got = _SOGOU_PAT.findall(fake_html)
