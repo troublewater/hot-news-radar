@@ -8,11 +8,11 @@
 
 板块二（非官方段子 -> 纯文字 -> X）
     docs/x/copy.txt    单条发帖素材（12 条，分隔线隔开）
-    docs/x/sources.txt 同一批素材的原样版本：出处 + 原文链接 + 正文，二创用
-    产出 12 条互不相干的单条帖子（标题 + 正文 + 钩子），用户自己挑着一条条发。
-    榜单接口每条只有 id/title/url、没有正文，所以正文另找来源：
-    公众号走搜狗微信（标题 + 首段摘要）、虎扑步行街（首帖正文）、百度贴吧热议。
-    故事抓不到时退回旧行为：拿榜单条目凑数，排序叠加「排他性」权重。
+    docs/x/sources.txt 抓来的原始素材：出处 + 原文链接 + 正文，查重和补细节用
+    先抓一批原贴当「事实毛坯」（公众号走搜狗微信、虎扑步行街、百度贴吧热议），
+    再把当天热搜里的钩子话题 + 这批毛坯交给模型，改写成隔断式小故事（不求真实）。
+    这样每条都是「有人有事」的完整故事，而不是标题 + 摘要 + 几个热评拼出来的碎片。
+    模型不可用（没配 AI_API_KEY / 调用失败）时退回原贴原样发出，不开天窗。
 
 两个板块靠标题特征区分（见 is_gossip 上面的 _GOSSIP_* 规则）。
 条目附带上榜平台、最高名次、排名涨跌、在榜次数 —— 这些报告里本来就有，不额外调 AI。
@@ -848,6 +848,174 @@ _MARKS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩",
           "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉘", "㉙", "㉚"]
 
 
+# ── AI 改编：把热搜里的钩子话题写成「隔断式」小故事 ───────────────────
+# 之前素材是「标题 + 原贴摘要 + 几个热评」，读起来断章取义（用户原话：词不达意、
+# 上下文不连贯）。用户要的是：从热门/争议里拎出话题，再改编成有人有事的小故事，
+# 不求真实，只要好看。这活儿规则做不了，交给模型。
+# key / base / model 沿用仓库已有的 AI_* 配置（用户已在 Secrets 里配好）。
+_AI_BASE = "https://open.bigmodel.cn/api/paas/v4"
+_AI_MODEL = "glm-4-flash"
+_AI_BATCH = 8                    # 一次要 8 条：要 30 条得拆几次，题目太长会越写越水
+_AI_TIMEOUT = 180
+
+# 钩子话题：热搜标题里出现这些词，就是「有故事 / 能吵起来」的题
+_HOOK_TOPIC = re.compile(
+    r"彩礼|结婚|离婚|婚房|相亲|恋|分手|出轨|前任|婆媳|婆婆|丈母娘|岳父|"
+    r"孩子|女儿|儿子|父亲|母亲|老人|夫妻|老公|老婆|"
+    r"同事|老板|领导|裁员|加班|年终奖|跳槽|工资|薪|借钱|亲戚|邻居|室友|同学|"
+    r"买房|房价|房贷|租房|学区|装修|车位|物业|份子钱|"
+    r"油车|电车|新能源|苹果|安卓|华为|小米|AMD|Intel|骁龙|显卡|"
+    r"预制菜|外卖|食堂|奶茶|养生|体检|医保|"
+    r"AI|人工智能|大模型|程序员|考公|考研|学历|海归|"
+    r"彩票|中奖|捡到|偷|骗|判|赔|起诉|退一赔三|"
+    r"男子|女子|大爷|大妈|小伙|姑娘|网友"
+)
+
+_AI_SYSTEM = """你在给一个中文社媒账号写「话题小故事」。账号人设是爱看热闹的普通网友，转述身边事，不说教、不端着、不站队。
+
+铁律：
+1. 写故事，不写新闻。不许出现「记者」「据报道」「相关部门」「引发热议」「值得深思」这类腔调。
+2. 允许自由改编：补细节、换人名地名（张姐、老王、我表弟那个单位），把事情落到一个具体的人身上。不要求真实，也不许加「网传」「据称」这种免责词。
+3. 排版必须是隔断式：每段 1~3 句，段与段之间空一行，正文 3~5 段，全文 150~350 字。
+4. 结尾落在一句有余味的转折或反讽上。不要总结、不要升华、不要问「你怎么看」。
+5. 不要 emoji，不要 #话题标签，不要小标题，不要序号。"""
+
+_AI_FEWSHOT = """范文一：
+这场婚姻，73天就谈到了1500万。
+上海一位父亲，儿子结婚前拿出2400万给他买房。本以为房子能让小两口日子过得更稳，结果领证两个多月，儿媳就提出离婚，并要求分割房产。
+事情眼看要变成“结婚73天，分走上千万”，父亲直接把儿子和儿媳一起告了。
+因为买房那2400万，并不是白送的。父亲早就让儿子写了借条，房款在法律关系上属于借款。如今婚姻要散，他干脆要求两人共同偿还这笔2400万债务。
+儿媳这边还在算房子能分多少，公公那边已经把整笔房款摆上了债务清单。
+本来是一套婚房，最后先变成了一张2400万的欠条。
+
+范文二：
+火车上明明坐着上千人，为什么几十份盒饭经常都卖不完？
+因为很多人搞反了一个逻辑：列车配盒饭，首先是为了保证“有人饿了能买到”，不是为了靠盒饭赚钱。
+对车上工作人员来说，卖10份还是卖50份，收入基本没区别，但卖得越多，推车、加热、清理、处理垃圾的活儿反而越多。
+所以盒饭价格高，有时反而能起到筛选需求的作用。大多数人会自带食物、吃泡面或者零食，真正有需要的人再买。
+这东西最重要的不是销量，而是一直有。
+看起来像生意，其实更像一项必须保留的服务。"""
+
+
+def _ai_config():
+    """key/base/model 走环境变量；没配就退回仓库 config.yaml 里的智谱默认。"""
+    key = os.environ.get("AI_API_KEY", "").strip()
+    base = os.environ.get("AI_API_BASE", "").strip() or _AI_BASE
+    model = os.environ.get("AI_MODEL", "").strip() or _AI_MODEL
+    if not key:                                  # 环境变量没给，从 yaml 里捞一把
+        try:
+            cfg = (Path(__file__).resolve().parent.parent / "config" / "config.yaml").read_text(
+                encoding="utf-8", errors="ignore")
+            m = re.search(r"^\s*api_key:\s*[\"']?([^\"\'\s#]+)", cfg, re.M)
+            key = (m.group(1) if m else "").strip()
+        except OSError:
+            key = ""
+    if model.startswith("openai/"):              # LiteLLM 前缀，直连时要去掉
+        model = model.split("/", 1)[1]
+    return key, base.rstrip("/"), model
+
+
+def _hook_topics(items, limit):
+    """热搜里挑「有故事」的题，按上榜平台数（共振）排热度。"""
+    seen, out = set(), []
+    ranked = sorted(items, key=lambda it: (-len(it["platforms"]), it["rank"]))
+    for it in ranked:
+        t = it["title"].strip()
+        if not t or t in seen or not _HOOK_TOPIC.search(t):
+            continue
+        if len(t) > 42 or _STORY_NOISE_TITLE.search(t):
+            continue
+        seen.add(t)
+        out.append((t, len(it["platforms"])))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _ai_call(key, base, model, system, user):
+    """一次 chat/completions。返回正文文本，失败返回空串。"""
+    body = json.dumps({
+        "model": model, "temperature": 1.0, "max_tokens": 4096,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+    }).encode()
+    req = urllib.request.Request(
+        base + "/chat/completions", data=body, method="POST",
+        headers={**_HEADERS, "Authorization": "Bearer " + key,
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=_AI_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8", "ignore"))
+        return data["choices"][0]["message"]["content"]
+    except Exception as exc:                     # noqa: BLE001 - 模型挂了就退回抽取式素材
+        print(f"  ⚠️ AI 改写失败：{type(exc).__name__}: {exc}")
+        return ""
+
+
+def _ai_parse(text):
+    """模型爱加说明和 ```json 围栏，只抠出那个 JSON 数组。"""
+    m = re.search(r"\[.*\]", text or "", re.S)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+    except ValueError:
+        return []
+    out = []
+    for it in data if isinstance(data, list) else []:
+        if not isinstance(it, dict):
+            continue
+        title = str(it.get("title", "")).strip()
+        paras = it.get("paras") or []
+        if isinstance(paras, str):
+            paras = [x for x in paras.split("\n") if x.strip()]
+        paras = [str(x).strip() for x in paras if str(x).strip()]
+        if title and paras:
+            out.append({"title": title, "paras": paras})
+    return out
+
+
+def ai_write_stories(items, seeds, top, now=None):
+    """把当天热搜话题交给模型，写成能单条发的隔断式故事。拿不到就返回空列表。"""
+    key, base, model = _ai_config()
+    if not key:
+        print("  ⚠️ 没配 AI_API_KEY，跳过改写，退回抓来的原贴")
+        return []
+    topics = _hook_topics(items, min(40, max(16, top * 2)))
+    if not topics:
+        return []
+    # 抓到的那批素材当「事实毛坯」递过去：模型改编时手上有细节，不至于全靠编
+    seeds = [{"标题": s["title"], "正文": s["desc"][:400]} for s in (seeds or [])[:top]]
+    wrote = []
+    for start in range(0, top, _AI_BATCH):
+        want = min(_AI_BATCH, top - len(wrote))
+        if want <= 0:
+            break
+        user = [
+            "今天各平台的热门话题（括号里是在几个平台上过榜）：",
+            "\n".join(f"{i}. {t}（{n} 个平台）" for i, (t, n) in enumerate(topics, 1)),
+        ]
+        if seeds:
+            user += ["", "今天从公众号 / 虎扑 / 贴吧抓到的原始素材（可以取细节，也可以完全不用）：",
+                     json.dumps(seeds, ensure_ascii=False)]
+        user += [
+            "", f"写 {want} 条，每条独立成帖。要求：",
+            "- 题材分散：婚嫁最多 2 条，其余分散到职场、钱、家庭、科技对比、生活观察。",
+            "- 已经写过的题材不要重复：" + ("、".join(x["title"] for x in wrote) or "（这是第一批）"),
+            "- title 是一到两句话的开场钩子（就像范文的第一句，直接抓住人）。",
+            "- paras 是后面 3~5 段，每段 1~3 句，隔断式。",
+            "", _AI_FEWSHOT,
+            "", '只输出 JSON 数组：[{"title": "开场钩子", "paras": ["第一段", "第二段"]}]，'
+                "不要任何解释，不要用 ``` 包裹。",
+        ]
+        got = _ai_parse(_ai_call(key, base, model, _AI_SYSTEM, "\n".join(user)))
+        if not got:
+            break
+        wrote += got
+    return [{"title": g["title"], "desc": "\n\n".join(g["paras"]), "src": "AI 改编",
+             "url": "", "replies": [], "ai": True} for g in wrote[:top]]
+
+
 def render_pool(stories, now=None, top=12, sep="-" * 18):
     """每条都是能**单独发**的一条帖子：标题 + 正文 + 钩子。
 
@@ -860,13 +1028,17 @@ def render_pool(stories, now=None, top=12, sep="-" * 18):
     for i, st in enumerate(stories[:top], 1):
         mark = _MARKS[i - 1] if i <= len(_MARKS) else f"{i}."
         lines = [f"{mark} {st['title']}", ""]
-        for para in _paragraphs(st["desc"]):
+        # AI 改编的故事自带分段（隔断式）和收尾句，再套模板钩子就成机器味了
+        paras = ([x for x in st["desc"].split("\n\n") if x.strip()]
+                 if st.get("ai") else _paragraphs(st["desc"]))
+        for para in paras:
             lines += [para, ""]
         # 虎扑的热评单独成段，天然就是「网友说」的对话感
         for reply in st.get("replies", []):
             lines += [f"网友：{reply[:90]}", ""]      # 完整热评留在 sources.txt
-        lines += [_HOOK_SELF[(seed + i) % len(_HOOK_SELF)],
-                  _ASK_ONE[(seed * 5 + i) % len(_ASK_ONE)]]
+        if not st.get("ai"):
+            lines += [_HOOK_SELF[(seed + i) % len(_HOOK_SELF)],
+                      _ASK_ONE[(seed * 5 + i) % len(_ASK_ONE)]]
         blocks.append("\n".join(lines))
     return ("\n" + sep + "\n").join(blocks) + "\n"
 
@@ -876,6 +1048,8 @@ def render_sources(stories, now=None):
     now = now or datetime.now()
     out = [f"# 二创素材 · {now.strftime('%Y-%m-%d')}",
            f"（{len(stories)} 条，来自公众号 / 虎扑步行街 / 百度贴吧）", ""]
+    if stories and stories[0].get("ai"):
+        out[1] = f"（{len(stories)} 条，AI 按当天热搜话题改编；下面是抓来的原始素材，查重和补细节用）"
     for i, st in enumerate(stories, 1):
         out.append(f"## {i}. {st['title']}")
         out.append(f"来源：{st.get('src', '未知')}")
@@ -927,6 +1101,8 @@ def main():
     ap.add_argument("--story-top", type=int, default=30,
                     help="素材池放几条（都带正文，用户自己挑着一条条发）")
     ap.add_argument("--no-stories", action="store_true", help="不抓公众号故事，退回榜单标题")
+    ap.add_argument("--no-ai", action="store_true", help="不做 AI 改编，直接发抓来的原贴")
+    ap.add_argument("--ai-top", type=int, default=12, help="AI 改编几条（要 30 条得有人工挑）")
     ap.add_argument("--handle", default="", help="卡片右下角署名，如 @your_x_handle")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
@@ -1065,6 +1241,22 @@ def main():
             "AI绘画这几年发展迅猛，工具越来越好用，网友的脑洞也一发不可收拾。"
         ).startswith("AI绘画这几年发展迅猛"), "广告头要切掉"
         assert _drop_ad_lead("画室 合格证 状元") == "画室 合格证 状元", "切完没正文就别切"
+        # AI 改编：解析要能扛住模型加说明 / 套 ```json 围栏
+        assert _ai_parse("好的：\n```json\n[{\"title\": \"T\", \"paras\": [\"a\", \"b\"]}]\n```").__len__() == 1
+        assert _ai_parse("不听话，没有 JSON") == []
+        assert _ai_parse('[{"title":"只有标题"}]') == []
+        ai_st = {"title": "开场钩子", "desc": "第一段。\n\n第二段。", "ai": True, "src": "AI 改编", "url": ""}
+        apool = render_pool([ai_st], top=1, now=datetime(2026, 9, 30, 8, 0))
+        assert "\n\n第二段。" in apool, "AI 故事的分段被 _paragraphs 重排了"
+        assert not any(h in apool for h in _HOOK_SELF), "AI 故事不该再套模板钩子"
+        assert "网友：" not in apool
+        # 钩子话题：只有标题里带钩子的才算，且按共振数排热度
+        hot = [{"title": "男子讨薪偷老板6千元被抓", "platforms": ["微博", "知乎"], "rank": 1},
+               {"title": "某公司发布新款服务器", "platforms": ["IT之家"], "rank": 1},
+               {"title": "彩礼谈崩了", "platforms": ["微博"], "rank": 5}]
+        tops = _hook_topics(hot, 5)
+        assert [t for t, _ in tops] == ["男子讨薪偷老板6千元被抓", "彩礼谈崩了"], tops
+        assert _ai_config()[1].startswith("http"), "AI base 没配出默认值"
         assert _ARTICLE_CHARS >= 500, "正文取太短就只剩引子了"
         assert _cut_sentences("第一句。第二句。第三句。", chars=10) == "第一句。第二句。", \
             _cut_sentences("第一句。第二句。第三句。", chars=10)
@@ -1140,10 +1332,15 @@ def main():
     # 抓不到才退回榜单标题——那样只有标题，信息量和卡片图没区别。
     stories = [] if args.no_stories else collect_stories(args.story_top)
     # collect_stories 里已经补过正文（换不到原文的已丢掉），这里不用再补一次。
+    # 板块二优先走 AI 改编：抓来的原贴读起来断章取义（摘要 + 几个热评拼在一起），
+    # 用户要的是「热搜话题 -> 有人有事的小故事」。改写失败就退回原贴，不开天窗。
+    ai_n = 0 if args.no_ai else args.ai_top
+    ai_stories = ai_write_stories(items, stories, ai_n) if ai_n else []
+    posted = ai_stories or stories
     (out / "copy.txt").write_text(
-        render_pool(stories, top=args.story_top) if stories
+        render_pool(posted, top=args.story_top) if posted
         else render_copy(items, args.site, top=args.copy_top), encoding="utf-8")
-    (out / "sources.txt").write_text(render_sources(stories), encoding="utf-8")
+    (out / "sources.txt").write_text(render_sources(stories or ai_stories), encoding="utf-8")
 
     print(f"板块一 官方·图  {len(official):>3} 条 -> {out/'card.html'}，取前 {args.top}")
     for i, it in enumerate(official[: args.top], 1):
@@ -1153,12 +1350,17 @@ def main():
     posts = [b for b in copy_text.split("-" * 18) if b.strip()]
     per = max((sum(2 if ord(c) > 127 else 1 for c in b) for b in posts), default=0)
     warn = "（超 280，得靠 Premium）" if per > 280 else "（普通账号也发得下）"
-    mix = " / ".join(f"{k} {sum(1 for s in stories if s.get('src') == k)}"
-                     for k in dict.fromkeys(s.get("src", "?") for s in stories))
-    src_note = f"故事 {len(stories):>2} 条（{mix}）" if stories else "⚠️ 没抓到故事，退回榜单标题"
+    if ai_stories:
+        src_note = f"AI 改编 {len(ai_stories):>2} 条（原始素材 {len(stories)} 条已留档）"
+    elif stories:
+        mix = " / ".join(f"{k} {sum(1 for s in stories if s.get('src') == k)}"
+                         for k in dict.fromkeys(s.get("src", "?") for s in stories))
+        src_note = f"故事 {len(stories):>2} 条（{mix}）"
+    else:
+        src_note = "⚠️ 没抓到故事，退回榜单标题"
     print(f"板块二 素材      {src_note} -> {out/'copy.txt'}"
           f"，最长一条 {per} 字符 {warn}")
-    shown = (stories or sorted(items, key=_sort_key))[: args.story_top if stories else args.copy_top]
+    shown = (posted or sorted(items, key=_sort_key))[: args.story_top if posted else args.copy_top]
     for i, it in enumerate(shown, 1):
         print(f"  {i:>2}. {it['title'][:44]}")
 
