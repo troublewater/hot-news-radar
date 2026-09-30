@@ -29,6 +29,6 @@ jobs:
         run: |
           set -e
           python3 scripts/gen_x_card.py --source "$RUNNER_TEMP/current.html" \
-            --out-dir "$RUNNER_TEMP/x" --top 8 --ai-top 12
+            --out-dir "$RUNNER_TEMP/x" --top 8 --ai-top 12 --no-stories
           echo "========== copy.txt =========="
           cat "$RUNNER_TEMP/x/copy.txt"
