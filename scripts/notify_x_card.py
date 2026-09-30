@@ -5,8 +5,9 @@
 为什么不复用项目自带的推送框架：那套有分批、多账号、报告渲染，
 对「一张卡片 + 一段文案」是过度设计。这里直连 webhook。
 
-默认只在推送窗口内发送（早 07:30-08:30、晚 20:30-21:30，与 timeline.yaml 一致），
-避免每半小时刷屏；--force 可忽略窗口。
+定时任务什么时候真的跑起来很不确定，所以时段放得很宽（早 05:00-13:00、
+晚 17:00-次日01:00），再靠「当天这个时段已经推过就跳过」防止重复。
+--force 可忽略这两层判断。
 
 用法：
     FEISHU_WEBHOOK_URL=xxx python3 scripts/notify_x_card.py
@@ -18,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -27,12 +29,41 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 CN_TZ = timezone(timedelta(hours=8))
-WINDOWS = [(7 * 60 + 30, 8 * 60 + 30), (20 * 60 + 30, 21 * 60 + 30)]
+# 为什么不像以前那样把窗口钉在半小时里：GitHub 的 cron 有 0~30 分钟延迟，
+# 爬虫本身还要跑十来分钟，两者一叠加就跑偏。窗口卡得越准，整天漏推的概率越高。
+# 所以改成上下午各一大段，重复推送交给下面那个记录文件去拦。
+SLOTS = [("am", 5 * 60, 13 * 60), ("pm", 17 * 60, 25 * 60)]
+DEFAULT_STATE = ".x-push-state"
+
+
+def slot_of(now):
+    """当前落在哪一段（am/pm），不在任何一段返回空串。"""
+    minute = now.hour * 60 + now.minute
+    for name, start, end in SLOTS:
+        if start <= minute < end:
+            return name
+    return ""
 
 
 def in_window(now):
-    minute = now.hour * 60 + now.minute
-    return any(start <= minute < end for start, end in WINDOWS)
+    return bool(slot_of(now))
+
+
+def pushed_before(state_path, now, slot):
+    """今天这一段推过没有。记录文件丢了就当没推过——多推一条总比漏推一天强。"""
+    try:
+        return Path(state_path).read_text(encoding="utf-8").strip() == f"{now:%Y-%m-%d} {slot}"
+    except OSError:
+        return False
+
+
+def mark_pushed(state_path, now, slot):
+    if not slot:
+        return
+    try:
+        Path(state_path).write_text(f"{now:%Y-%m-%d} {slot}", encoding="utf-8")
+    except OSError as exc:      # 写不上就算了，不影响主流程
+        print(f"⚠️ 推送记录没写上：{exc}")
 
 
 def build_content(copy_text, image_url, site_url, now=None):
@@ -78,7 +109,8 @@ def main():
     ap.add_argument("--copy", default="docs/x/copy.txt", help="文案文件")
     ap.add_argument("--site", default="", help="站点地址，用于图片链接和页脚链接")
     ap.add_argument("--image-url", default="", help="卡片 PNG 的完整地址，留空则不发图")
-    ap.add_argument("--force", action="store_true", help="忽略推送时间窗口")
+    ap.add_argument("--force", action="store_true", help="忽略时段和当天去重，强制发送")
+    ap.add_argument("--state", default=DEFAULT_STATE, help="推送记录文件，防止同一时段重复推送")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -95,19 +127,37 @@ def main():
         assert "https://example.com/x/sources.txt" in el["content"], "二创素材链接没生成"
         assert "![" not in el["content"], "不能再用 markdown 图片语法，飞书会拒收外链"
         assert json.dumps(payload, ensure_ascii=False), "payload 无法序列化"
-        assert in_window(datetime(2026, 9, 29, 8, 0, tzinfo=CN_TZ)), "早窗口判定错"
-        assert not in_window(datetime(2026, 9, 29, 12, 0, tzinfo=CN_TZ)), "午间不应在窗口内"
-        assert in_window(datetime(2026, 9, 29, 21, 0, tzinfo=CN_TZ)), "晚窗口判定错"
-        print("selftest OK — payload 结构与窗口判定都正确")
+        assert slot_of(datetime(2026, 9, 29, 8, 0, tzinfo=CN_TZ)) == "am", "上午时段判定错"
+        assert slot_of(datetime(2026, 9, 29, 21, 0, tzinfo=CN_TZ)) == "pm", "晚间时段判定错"
+        assert not in_window(datetime(2026, 9, 29, 3, 0, tzinfo=CN_TZ)), "凌晨不该推"
+        assert not in_window(datetime(2026, 9, 29, 15, 0, tzinfo=CN_TZ)), "下午三点不该推"
+        # 定时任务落点漂移很大，光靠时段会漏推；去重记录保证「一天两次」而不是「一天零次」
+        with tempfile.TemporaryDirectory() as td:
+            state = os.path.join(td, "state")
+            morning = datetime(2026, 9, 29, 8, 0, tzinfo=CN_TZ)
+            assert not pushed_before(state, morning, "am")
+            mark_pushed(state, morning, "am")
+            assert pushed_before(state, datetime(2026, 9, 29, 10, 0, tzinfo=CN_TZ), "am"), \
+                "同一时段第二次没被挡住"
+            assert not pushed_before(state, datetime(2026, 9, 29, 21, 0, tzinfo=CN_TZ), "pm"), \
+                "晚上不该被早上的记录挡住"
+            assert not pushed_before(state, datetime(2026, 9, 30, 8, 0, tzinfo=CN_TZ), "am"), \
+                "隔天不该被头一天的记录挡住"
+        print("selftest OK — payload 结构、时段判定、当天去重都正确")
         return
 
     webhook = os.environ.get("FEISHU_WEBHOOK_URL", "").strip()
     if not webhook:
         raise SystemExit("缺少 FEISHU_WEBHOOK_URL 环境变量")
 
-    if not args.force and not in_window(now):
-        print(f"[{now:%H:%M}] 不在推送窗口内（07:30-08:30 / 20:30-21:30），跳过。加 --force 可强制发送")
-        return
+    slot = slot_of(now)
+    if not args.force:
+        if not slot:
+            print(f"[{now:%H:%M}] 不在推送时段内（05:00-13:00 / 17:00-次日01:00），跳过")
+            return
+        if pushed_before(args.state, now, slot):
+            print(f"[{now:%H:%M}] 今天这个时段已经推过了，跳过")
+            return
 
     copy_path = Path(args.copy)
     if not copy_path.is_file():
@@ -127,7 +177,8 @@ def main():
 
     if not ok:
         raise SystemExit(f"飞书拒收：{json.dumps(body, ensure_ascii=False)[:300]}")
-    print(f"已推送飞书（{now:%H:%M}），配图：{image_url or '无'}")
+    mark_pushed(args.state, now, slot)
+    print(f"已推送飞书（{now:%H:%M}）{'（--force 强制）' if args.force else ''}，配图：{image_url or '无'}")
 
 
 if __name__ == "__main__":
