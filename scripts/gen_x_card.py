@@ -475,23 +475,30 @@ def fetch_article(url, chars=_ARTICLE_CHARS):
 
 
 def enrich_fulltext(stories, chars=_ARTICLE_CHARS):
-    """把公众号素材换成原文正文；抓不到就保留摘要，不算失败。"""
-    got = 0
+    """把公众号素材换成原文正文；换不到原文的整条丢掉。
+
+    搜狗只给一百来字的摘要，还从半句中间切。拿它当发帖素材就是「掐头去尾」，
+    后半句接上钩子根本读不通。宁肯少几条，也不发半截话。
+    """
+    got, kept = 0, []
     for st in stories:
         if st.get("src") != "公众号" or not st.get("url"):
+            kept.append(st)
             continue
         real = _wechat_url(st["url"])
         if not real:                               # 连着换十几次地址会被限流，歇一下再来一遍
             time.sleep(3)
             real = _wechat_url(st["url"])
         body = fetch_article(real, chars) if real else ""
-        if body:
-            st["desc"] = body
-            st["url"] = real                       # 换成正主地址，搜狗那个跳转是有时效的
-            got += 1
+        if not body:
+            continue                               # 摘要版读不通，不要
+        st["desc"] = body
+        st["url"] = real                           # 换成正主地址，搜狗那个跳转是有时效的
+        kept.append(st)
+        got += 1
         time.sleep(0.6)                            # 连着换地址容易被限流，间隔别抠
-    print(f"  正文补全：{got}/{len(stories)} 条拿到原文")
-    return stories
+    print(f"  正文补全：{got}/{len(stories)} 条拿到原文，其余丢弃")
+    return kept
 
 
 def fetch_stories(keywords=None, now=None, limit=12, per_keyword=6):
@@ -609,7 +616,7 @@ def fetch_hupu(limit=4, probe=12):
         seen.add(href)
         detail = _get("https://bbs.hupu.com" + href)
         body, replies = _hupu_material(detail) if detail else ("", [])
-        if len(body) + sum(len(r) for r in replies) < 50:
+        if len(body) < 60:                     # 首帖没正文，剩下的热评没头没尾，整条不要
             continue
         out.append({"title": title, "desc": body, "replies": replies,
                     "src": "虎扑步行街", "url": "https://bbs.hupu.com" + href})
@@ -646,11 +653,13 @@ def fetch_tieba(limit=3):
 
 def collect_stories(top):
     """汇总三个源并按题材去重。交错着取，免得一个源把另一个挤没。"""
-    groups = [fetch_stories(), fetch_hupu(limit=12, probe=24), fetch_tieba(limit=3)]
+    groups = [fetch_stories(limit=20), fetch_hupu(limit=20, probe=36), fetch_tieba(limit=6)]
     pool = []
     for i in range(max((len(x) for x in groups), default=0)):
         pool += [x[i] for x in groups if i < len(x)]
-    return _pick_stories(pool, top)
+    # 先多挑几条再补正文：搜狗那迪经常换不到原文，换不到的整条要丢，
+    # 不多留点余量就凑不满 top 条。
+    return _pick_stories(enrich_fulltext(_pick_stories(pool, top + 8)), top)
 
 
 def _story_ok(desc):
@@ -956,6 +965,19 @@ def main():
         # 标题层：整年合集和软广，正文再像样也得拦在门外
         assert _STORY_NOISE_TITLE.search("2019年最后的沙雕新闻正式出炉！"), "年度合集没在标题层被拦"
         assert _STORY_AD.search("万万没想到，手指上竟然隐藏着这个淡斑开关"), "标题里的软广没被拦"
+        # 换不到原文的公众号素材要整条丢掉：半截摘要接上钩子根本读不通
+        g = globals()
+        keep_wechat, keep_fetch = g["_wechat_url"], g["fetch_article"]
+        g["_wechat_url"] = lambda url: "https://mp.weixin.qq.com/s/x"
+        g["fetch_article"] = lambda url, chars=0: ""
+        try:
+            left = enrich_fulltext([
+                {"title": "只有摘要的", "desc": "d" * 40, "src": "公众号", "url": "u"},
+                {"title": "虎扑的", "desc": "d" * 40, "src": "虎扑步行街", "url": "u"},
+            ])
+        finally:
+            g["_wechat_url"], g["fetch_article"] = keep_wechat, keep_fetch
+        assert [x["title"] for x in left] == ["虎扑的"], f"拿不到原文的没被丢掉：{left}"
         assert scopy.count("-" * 18) == 1, "两条之间应该正好一条分隔线"
         ssrc = render_sources(stories, now=datetime(2026, 9, 29, 8, 0))
         assert "二创素材" in ssrc and "https://example.com/a" in ssrc, "素材文件没带原文链接"
@@ -1006,8 +1028,7 @@ def main():
     # 板块二：故事素材池 -> 每条单独发。正文来自 collect_stories（公众号 / 虎扑 / 贴吧）；
     # 抓不到才退回榜单标题——那样只有标题，信息量和卡片图没区别。
     stories = [] if args.no_stories else collect_stories(args.story_top)
-    if stories:
-        enrich_fulltext(stories)
+    # collect_stories 里已经补过正文（换不到原文的已丢掉），这里不用再补一次。
     (out / "copy.txt").write_text(
         render_pool(stories, top=args.story_top) if stories
         else render_copy(items, args.site, top=args.copy_top), encoding="utf-8")
