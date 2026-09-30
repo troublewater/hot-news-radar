@@ -1,0 +1,34 @@
+name: X 文案试跑（不跑爬虫）
+
+# 临时：只验 AI 改写效果，直接用仓库里已有的榜单快照，不跑爬虫（省 12 分钟）。
+# 验证完就删掉这个文件。
+on:
+  workflow_dispatch:
+
+jobs:
+  story:
+    runs-on: ubuntu-latest
+    env:
+      AI_API_KEY: ${{ secrets.AI_API_KEY }}
+      AI_MODEL: ${{ secrets.AI_MODEL }}
+      AI_API_BASE: ${{ secrets.AI_API_BASE }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: 取最新榜单快照
+        run: |
+          set -e
+          git fetch --depth=1 origin reports
+          git show origin/reports:reports/latest/current.html > "$RUNNER_TEMP/current.html"
+          ls -l "$RUNNER_TEMP/current.html"
+
+      - name: 生成文案
+        run: |
+          set -e
+          python3 scripts/gen_x_card.py --source "$RUNNER_TEMP/current.html" \
+            --out-dir "$RUNNER_TEMP/x" --top 8 --ai-top 12
+          echo "========== copy.txt =========="
+          cat "$RUNNER_TEMP/x/copy.txt"
