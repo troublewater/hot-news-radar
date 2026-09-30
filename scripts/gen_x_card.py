@@ -498,6 +498,28 @@ def _drop_lead_dialogue(text):
     return text
 
 
+# 公众号自家广告：一串没有句号的招生话术，后头直接粘正文（实测画室号最典型）。
+# 命中密度不够就不动手，正常文章偶尔提一句「招生」不会被误伤。
+_PROMO_WORDS = re.compile(
+    r"画室|培训机构|辅导班|合格证|状元|招生|报名咨询|咨询热线|扫码|关注我们|点击上方|"
+    r"微信号|粉丝群|优惠|限时|原价|现价|下单|购买|店铺|代理|加盟|领券|学员")
+_AD_PROMO_MIN = 3
+
+
+def _drop_ad_lead(text):
+    """把开头那段自家广告切掉，从最后一个促销词所在的从句后面接正文。
+
+    ponytail: 靠促销词密度认广告，碰到新话术就往 _PROMO_WORDS 里添词。
+    """
+    hits = list(_PROMO_WORDS.finditer(text[:400]))
+    if len(hits) < _AD_PROMO_MIN:
+        return text
+    cut = text.find("，", hits[-1].end())
+    if cut < 0 or cut > 400 or len(text) - cut < 20:
+        return text                         # 别把整篇切没了
+    return text[cut + 1:].lstrip()
+
+
 def fetch_article(url, chars=_ARTICLE_CHARS):
     """公众号正文。文章页 3 MB 起（前半是脚本和样式），读到正文容器就够。"""
     headers = dict(_HEADERS)
@@ -513,7 +535,7 @@ def fetch_article(url, chars=_ARTICLE_CHARS):
     if not block:
         return ""
     body = _clean_text(re.sub(r"<[^>]+>", " ", block.group(1)))
-    return _cut_sentences(_drop_lead_dialogue(_strip_article_head(body)), chars)
+    return _cut_sentences(_drop_ad_lead(_drop_lead_dialogue(_strip_article_head(body))), chars)
 
 
 def enrich_fulltext(stories, chars=_ARTICLE_CHARS):
@@ -1036,6 +1058,13 @@ def main():
         assert _drop_lead_dialogue("正文开头就是正文。第二句。") == "正文开头就是正文。第二句。", \
             "没有引子时不该乱切"
         assert _drop_lead_dialogue("“短”") == "“短”", "整篇都是引语时不该吃光"
+        assert _drop_ad_lead("正文偶尔提一句招生，不算广告。") == "正文偶尔提一句招生，不算广告。", \
+            "促销词太少就别动手"
+        assert _drop_ad_lead(
+            "某某画室连续斩获状元 共取得合格证 1034 张 画室学员报名咨询电话 123，"
+            "AI绘画这几年发展迅猛，工具越来越好用，网友的脑洞也一发不可收拾。"
+        ).startswith("AI绘画这几年发展迅猛"), "广告头要切掉"
+        assert _drop_ad_lead("画室 合格证 状元") == "画室 合格证 状元", "切完没正文就别切"
         assert _ARTICLE_CHARS >= 500, "正文取太短就只剩引子了"
         assert _cut_sentences("第一句。第二句。第三句。", chars=10) == "第一句。第二句。", \
             _cut_sentences("第一句。第二句。第三句。", chars=10)
