@@ -857,6 +857,7 @@ _AI_BASE = "https://open.bigmodel.cn/api/paas/v4"
 _AI_MODEL = "glm-4-flash"
 _AI_BATCH = 4                    # 一次 4 条：一次要太多会撞输出上限，JSON 被截断就整批作废
 _AI_TIMEOUT = 180
+_FREQ_PATH = Path(__file__).resolve().parent.parent / "config" / "frequency_words.txt"
 
 # 钩子话题：热搜标题里出现这些词，就是「有故事 / 能吵起来」的题
 _HOOK_TOPIC = re.compile(
@@ -918,22 +919,59 @@ def _ai_config():
     return key, base.rstrip("/"), model
 
 
-def _hook_topics(items, limit):
-    """热搜里挑「有故事」的题，按上榜平台数（共振）排热度。"""
-    seen, out = set(), []
-    ranked = sorted(items, key=lambda it: (-len(it["platforms"]), it["rank"]))
-    for it in ranked:
-        t = it["title"].strip()
-        if not t or t in seen or not _HOOK_TOPIC.search(t):
-            continue
-        if len(t) > 42 or _STORY_NOISE_TITLE.search(t):
-            continue
-        seen.add(t)
-        out.append((t, len(it["platforms"])))
-        if len(out) >= limit:
-            break
-    return out
+# 题材型母题白名单（词库里的分组名）。其余分组是修饰词（「离谱」「网友」「热搜」），
+# 拿它们当选题方向讲不出故事，只会变成新闻复述。
+_TOPIC_GROUPS = [
+    "彩礼婚恋", "家庭伦理", "男女对立", "翻车塌房", "离谱现场",
+    "科技之争", "数码翻车", "车圈", "消费维权", "职场", "钱与房",
+    "教育", "医疗", "娱乐圈", "网红直播",
+]
 
+# 新闻腔标题不进选题池：复述政策/财报/发布会读起来就是搬运，不是故事
+_NEWSY_TITLE = re.compile(
+    r"新政|政策|发布|获批|印发|通知|方案|条例|规定|试点|上线|指数|GDP|"
+    r"财报|涨停|跌超|收盘|细则|征求意见|解读|发布会|通告|公告|宣布")
+
+
+def _load_topic_words():
+    """从 config/frequency_words.txt 读分组词：{组名: [词]}。正则词只取里面的中文片段。"""
+    groups, name = {}, ""
+    try:
+        text = _FREQ_PATH.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return groups
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1] if line[1:-1] in _TOPIC_GROUPS else ""
+            groups.setdefault(name, [])
+            continue
+        if not name or not line or line.startswith("#"):
+            continue
+        words = re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}", line)
+        groups[name] += [w for w in words if len(w) >= 2]
+    return {k: v for k, v in groups.items() if k and v}
+
+
+def _hook_topics(items, limit):
+    """今天哪几个母题在发酵：返回 [(母题, [今天的风向标题...])]。
+
+    给模型的不是「照这个标题写」，而是「这个方向今天有人在聊」，免得写成新闻复述。
+    """
+    groups = _load_topic_words()
+    hits = {}
+    for it in items:
+        t = it["title"].strip()
+        if not t or len(t) > 42 or _NEWSY_TITLE.search(t) or _STORY_NOISE_TITLE.search(t):
+            continue
+        for g, words in groups.items():
+            if any(w in t for w in words):
+                hits.setdefault(g, []).append((len(it["platforms"]), t))
+    out = []
+    for g, rows in sorted(hits.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        rows = sorted(set(rows), reverse=True)[:2]
+        out.append((g, [t for _, t in rows]))
+    return out[:limit]
 
 def _ai_call(key, base, model, system, user):
     """一次 chat/completions。返回正文文本，失败返回空串。"""
@@ -1011,17 +1049,21 @@ def ai_write_stories(items, seeds, top, now=None):
         want = min(_AI_BATCH, top - len(wrote))
         if want <= 0:
             break
-        # 一条对一个话题，按顺序发下去。之前只给一整张清单，模型会扭头去抄范文。
-        batch = topics[start:start + want]
+        # 一条对一个母题。之前直接拿热搜标题当题，模型就照着标题复述，成了新闻搬运。
+        if not topics:
+            break
+        batch = [topics[(start + n) % len(topics)] for n in range(want)]
         user = [
-            "今天的热门话题（括号里是在几个平台上过榜）。一条写一个，顺序对应，不要另选题：",
-            "\n".join(f"{i}. {t}（{n} 个平台）" for i, (t, n) in enumerate(batch, 1)),
+            "今天的风向（母题 + 今天相关的热搜标题）。标题只说明这个方向今天有人在聊，"
+            "不要复述它，也别出现里面的机构名、产品名、政策名，写这一类的普通人故事：",
         ]
+        for n, (group, winds) in enumerate(batch, 1):
+            user.append(f"{n}. {group}：" + "；".join(winds))
         if seeds:
             user += ["", "今天从公众号 / 虎扑 / 贴吧抓到的原始素材（有用就取细节，没用就丢掉）：",
                      json.dumps(seeds, ensure_ascii=False)]
         user += [
-            "", f"把上面这 {len(batch)} 条话题各写成一条独立帖子。",
+            "", f"把上面这 {len(batch)} 条母题各写成一条独立帖子，一条一个，顺序对应。",
             "- title 是一到两句话的开场钩子（像范文的第一句那样直接把事端出来）。",
             "- paras 是后面 4~6 段，每段 1~3 句，隔断式。",
             "", _AI_FEWSHOT,
@@ -1277,9 +1319,14 @@ def main():
         # 钩子话题：只有标题里带钩子的才算，且按共振数排热度
         hot = [{"title": "男子讨薪偷老板6千元被抓", "platforms": ["微博", "知乎"], "rank": 1},
                {"title": "某公司发布新款服务器", "platforms": ["IT之家"], "rank": 1},
-               {"title": "彩礼谈崩了", "platforms": ["微博"], "rank": 5}]
+               {"title": "彩礼谈崩了", "platforms": ["微博"], "rank": 5},
+               {"title": "Mate90 系列新品发布会", "platforms": ["微博"], "rank": 1}]
         tops = _hook_topics(hot, 5)
-        assert [t for t, _ in tops] == ["男子讨薪偷老板6千元被抓", "彩礼谈崩了"], tops
+        assert {g for g, _ in tops} >= {"职场", "彩礼婚恋"}, tops
+        assert "发布会" not in "".join(w for _, ws in tops for w in ws), "新闻腔标题不该进选题"
+        assert all(w for _, ws in tops for w in ws)
+        _tw = _load_topic_words()
+        assert "彩礼" in _tw.get("彩礼婚恋", []), _tw.get("彩礼婚恋")
         assert _ai_config()[1].startswith("http"), "AI base 没配出默认值"
         assert _ARTICLE_CHARS >= 500, "正文取太短就只剩引子了"
         assert _cut_sentences("第一句。第二句。第三句。", chars=10) == "第一句。第二句。", \
