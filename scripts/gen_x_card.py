@@ -921,7 +921,7 @@ def _yaml_ai():
             encoding="utf-8", errors="ignore")
     except OSError:
         return cfg
-    for key in ("api_key", "model", "api_base", "x_writer_model"):
+    for key in ("api_key", "model", "api_base", "x_writer_model", "x_writer_api_base"):
         m = re.search(r"^\s*" + key + r":\s*[\"']?([^\"'\s#]+)", text, re.M)
         if m:
             cfg[key] = m.group(1).strip()
@@ -933,7 +933,7 @@ def _ai_config():
     y = _yaml_ai()
     key = os.environ.get("AI_API_KEY", "").strip() or y.get("api_key", "")
     base = (os.environ.get("AI_API_BASE", "").strip()
-            or y.get("api_base", "") or _AI_BASE)
+            or y.get("x_writer_api_base", "") or y.get("api_base", "") or _AI_BASE)
     # 写故事可以单独指定模型（ai.x_writer_model）：爬虫的 AI 分析用什么跟这里无关
     model = (os.environ.get("AI_MODEL", "").strip()
              or y.get("x_writer_model", "") or y.get("model", "") or _AI_MODEL)
@@ -1120,13 +1120,13 @@ def ai_write_stories(items, seeds, top, now=None):
         got = []
         for cand in models:                     # 第一个有回话的模型认下来，之后不再换
             raw = _ai_call(key, base, cand, _AI_SYSTEM, "\n".join(user))
-            if raw.strip():
-                model, models = cand, [cand]
-                got = [x for x in _ai_parse(raw) if _ai_ok(x)]
-                if got:
-                    break
+            got = [x for x in _ai_parse(raw) if _ai_ok(x)]
+            if got:
+                model, models = cand, [cand]     # 认下这个模型，后面的批次不再换
+                break
         if not got:
-            print("  ⚠️ AI 这批没写出合格的（至少 3 段、150 字），跳过")
+            print("  ⚠️ 试过的模型都没写出合格内容（要求：至少 3 段、150 字）")
+            print("     → 多半是模型太弱或被限流。可改 config/config.yaml 的 ai.x_writer_model")
             break
         wrote += got
         print(f"  AI 改写：{len(batch)} 条话题 -> 成稿 {len(got)} 条")
