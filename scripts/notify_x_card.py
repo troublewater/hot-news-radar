@@ -66,6 +66,17 @@ def mark_pushed(state_path, now, slot):
         print(f"⚠️ 推送记录没写上：{exc}")
 
 
+def should_send(state_path, now, force=False):
+    """要不要发。返回 (发不发, 当前时段, 不发的理由)。"""
+    slot = slot_of(now)
+    if not force:
+        if not slot:
+            return False, "", "不在推送时段内（05:00-13:00 / 17:00-次日01:00）"
+        if pushed_before(state_path, now, slot):
+            return False, slot, "今天这个时段已经推过了"
+    return True, slot, ""
+
+
 def build_content(copy_text, image_url, site_url, now=None):
     now = now or datetime.now(CN_TZ)
     # 首行固定含「热点」：飞书自定义机器人的关键词校验可用 批次,热点 两个词兜住
@@ -135,14 +146,19 @@ def main():
         with tempfile.TemporaryDirectory() as td:
             state = os.path.join(td, "state")
             morning = datetime(2026, 9, 29, 8, 0, tzinfo=CN_TZ)
-            assert not pushed_before(state, morning, "am")
+            assert should_send(state, morning)[0], "上午时段该发"
             mark_pushed(state, morning, "am")
-            assert pushed_before(state, datetime(2026, 9, 29, 10, 0, tzinfo=CN_TZ), "am"), \
-                "同一时段第二次没被挡住"
-            assert not pushed_before(state, datetime(2026, 9, 29, 21, 0, tzinfo=CN_TZ), "pm"), \
-                "晚上不该被早上的记录挡住"
-            assert not pushed_before(state, datetime(2026, 9, 30, 8, 0, tzinfo=CN_TZ), "am"), \
-                "隔天不该被头一天的记录挡住"
+            later = datetime(2026, 9, 29, 10, 0, tzinfo=CN_TZ)
+            assert not should_send(state, later)[0], "同一时段第二次该被拦住"
+            tonight = datetime(2026, 9, 29, 21, 0, tzinfo=CN_TZ)
+            assert should_send(state, tonight)[0], "晚上不该被早上的记录挡住"
+            mark_pushed(state, tonight, "pm")
+            tonight_again = datetime(2026, 9, 29, 22, 0, tzinfo=CN_TZ)
+            assert not should_send(state, tonight_again)[0], "晚上推完第二次该被拦住"
+            assert should_send(state, tonight_again, force=True)[0], "--force 该放行"
+            night = datetime(2026, 9, 29, 3, 0, tzinfo=CN_TZ)
+            assert not should_send(state, night)[0], "凌晨不该发"
+            assert should_send(state, night, force=True)[0], "--force 凌晨也该能发"
         print("selftest OK — payload 结构、时段判定、当天去重都正确")
         return
 
@@ -150,14 +166,10 @@ def main():
     if not webhook:
         raise SystemExit("缺少 FEISHU_WEBHOOK_URL 环境变量")
 
-    slot = slot_of(now)
-    if not args.force:
-        if not slot:
-            print(f"[{now:%H:%M}] 不在推送时段内（05:00-13:00 / 17:00-次日01:00），跳过")
-            return
-        if pushed_before(args.state, now, slot):
-            print(f"[{now:%H:%M}] 今天这个时段已经推过了，跳过")
-            return
+    send, slot, why = should_send(args.state, now, args.force)
+    if not send:
+        print(f"[{now:%H:%M}] {why}，跳过")
+        return
 
     copy_path = Path(args.copy)
     if not copy_path.is_file():
