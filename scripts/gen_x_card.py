@@ -1145,9 +1145,12 @@ def ai_write_stories(items, seeds, top, now=None):
         ]
         for n, (group, winds) in enumerate(batch, 1):
             user.append(f"{n}. {group}：" + "；".join(winds))
-        if seeds:
+        if seeds and start == 0:
+            # 只在第一批给素材：每批都给的话，模型会拿同一条素材写出好几篇一样的
             user += ["", "今天从公众号 / 虎扑 / 贴吧抓到的原始素材（有用就取细节，没用就丢掉）：",
                      json.dumps(seeds, ensure_ascii=False)]
+        elif wrote:
+            user += ["", "已经发过的选题（换个角度写，别重复）：" + "、".join(x["title"] for x in wrote)]
         user += [
             "", f"把上面这 {len(batch)} 条母题各写成一条独立帖子，一条一个，顺序对应。",
             "- title 是一到两句话的开场钩子，直接把事端出来。可以用这类起手式，但别每条都用同一个：",
