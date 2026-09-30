@@ -273,8 +273,18 @@ jobs:
 
       # ── 推送 X 素材到飞书 ──────────────────────────────────────────────
       # 放在 Sync 之后，确保卡片图链接已经上线再推送。
-      # 脚本自带时间窗口（07:30-08:30 / 20:30-21:30），定时运行不会每半小时刷屏；
+      # 脚本自带时段判断（05:00-13:00 / 17:00-次日01:00）和当天去重：定时任务什么时候
+      # 真的跑起来很不确定，时段只能放宽，放宽就可能同一时段推两次，靠下面那个缓存文件压住。
       # 手动触发时强制发送，方便随时验证效果。
+      # 推送去重记录存 Actions 缓存：不往分支里写东西，也不会触发 Pages 重新构建。
+      - name: Restore push marker
+        if: success()
+        uses: actions/cache/restore@v4
+        with:
+          path: .x-push-state
+          key: x-push-${{ github.run_id }}
+          restore-keys: x-push-
+
       - name: Notify X card to Feishu
         if: success()
         env:
@@ -282,6 +292,13 @@ jobs:
           SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
           FORCE_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
         run: python3 scripts/notify_x_card.py --site "$SITE_URL" $FORCE_FLAG
+
+      - name: Save push marker
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .x-push-state
+          key: x-push-${{ github.run_id }}
 
       # --------------------------------------------------------------------------------
       # ☁️ CLOUDFLARE PAGES DEPLOY / 部署到 Cloudflare Pages（可选）
