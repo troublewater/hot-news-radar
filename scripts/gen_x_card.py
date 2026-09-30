@@ -1078,6 +1078,38 @@ def _ai_parse(text):
     return out
 
 
+_AI_PROBE_MODELS = ["glm-4.7-flash", "glm-4.5-flash", "glm-4-flash", "glm-4.6-flash",
+                    "glm-4-plus", "glm-4.7", "deepseek-chat", "deepseek-v4-pro"]
+
+
+def ai_probe():
+    """拿当前 key 挨个问一遍，看哪些模型真能用。"""
+    key, base, _ = _ai_config()
+    if not key:
+        print("没配 AI_API_KEY / ai.api_key，没法探测")
+        return
+    print(f"接口：{base}")
+    for model in _AI_PROBE_MODELS:
+        body = json.dumps({"model": model, "max_tokens": 16,
+                           "messages": [{"role": "user", "content": "回一个字：好"}]}).encode()
+        req = urllib.request.Request(
+            base + "/chat/completions", data=body, method="POST",
+            headers={**_HEADERS, "Authorization": "Bearer " + key,
+                     "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8", "ignore"))
+            print(f"  ✅ {model}：{data['choices'][0]['message']['content'].strip()[:20]}")
+        except Exception as exc:                 # noqa: BLE001 - 探测就是要看各种失败
+            detail = ""
+            if hasattr(exc, "read"):
+                try:
+                    detail = exc.read().decode("utf-8", "ignore")[:120]
+                except Exception:                # noqa: BLE001
+                    detail = ""
+            print(f"  ❌ {model}：{type(exc).__name__} {detail}")
+
+
 def ai_write_stories(items, seeds, top, now=None):
     """把当天热搜话题交给模型，写成能单条发的隔断式故事。拿不到就返回空列表。"""
     key, base, model = _ai_config()
@@ -1222,8 +1254,13 @@ def main():
     ap.add_argument("--no-ai", action="store_true", help="不做 AI 改编，直接发抓来的原贴")
     ap.add_argument("--ai-top", type=int, default=12, help="AI 改编几条（要 30 条得有人工挑）")
     ap.add_argument("--handle", default="", help="卡片右下角署名，如 @your_x_handle")
+    ap.add_argument("--ai-probe", action="store_true", help="探测当前 key 能用哪些模型")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
+
+    if args.ai_probe:
+        ai_probe()
+        return
 
     if args.selftest:
         fixture = Path("tests/golden/html_snapshot_A.html")
