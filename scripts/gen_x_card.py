@@ -367,6 +367,8 @@ _STORY_WIKI = re.compile(r".{0,16}(又称|也称|是一种|是指|释义)")
 def _clean_text(s):
     """搜狗把中文标点统一换成了半角，直接发出去很出戏。"""
     s = html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
+    # 虎扑正文里的 <img> 属性带 > 时，上面的标签正则切不干净，会剩下一截图片 URL
+    s = re.sub(r"\S*(?:x-oss-process|/quality/|ignore-error)\S*", " ", s)
     s = re.sub(r"[.．]{2,}$", "…", s)                 # 先收尾，否则句号会被拆成「。…」
     s = re.sub(r'^[”"’]+', "", s)                     # 摘要常从半句引号中间切进来
     # 闭引号、右括号跟在中文后面时也算「中文语境」，否则「问题”.「下一句」会漏掉
@@ -539,6 +541,8 @@ def fetch_stories(keywords=None, now=None, limit=12, per_keyword=6):
 # 虎扑步行街：段子和争议故事的老窝，帖子页有完整首帖正文，值几次请求。
 _HUPU_LIST = "https://bbs.hupu.com/bxj"
 _HUPU_BODY = re.compile(r'(?s)class="thread-content-detail">(.*?)</div>')
+# 虎扑官方活动帖（发帖赢好礼那一套）是运营广告，不是网友故事
+_HUPU_PROMO = re.compile(r"活动正式开启|赢官方|官方好礼|带话题发贴|名额|速来|点击报名")
 
 
 def _paragraphs(text, budget=52, max_par=6):
@@ -616,7 +620,8 @@ def fetch_hupu(limit=4, probe=12):
         seen.add(href)
         detail = _get("https://bbs.hupu.com" + href)
         body, replies = _hupu_material(detail) if detail else ("", [])
-        if len(body) < 60:                     # 首帖没正文，剩下的热评没头没尾，整条不要
+        if len(body) < 60 or _HUPU_PROMO.search(title + body):
+            # 前者：首帖没正文，剩下的热评没头没尾。后者：官方活动广告
             continue
         out.append({"title": title, "desc": body, "replies": replies,
                     "src": "虎扑步行街", "url": "https://bbs.hupu.com" + href})
@@ -922,6 +927,10 @@ def main():
         assert "http" not in copy and "#" not in copy, "文案里不该再有链接或话题标签"
         # 故事正文：搜狗摘要是半角标点，还要能渲染成「标题 + 缩进正文」
         assert _clean_text("彩礼给了,婚没结成.打了一年官司...") == "彩礼给了，婚没结成。打了一年官司…"
+        assert "x-oss-process" not in _clean_text(
+            "网友：这6次1次没高潮 /quality/50/ignore-error/1?x-oss-process=image/resize,w_225\"/>"), \
+            "热评里的图片标签残渣没洗干净"
+        assert _HUPU_PROMO.search("「国庆回血计划」活动正式开启！"), "虎扑活动广告没被拦"
         fake_html = ('<div class="txt-box"><h3><a href="/link?url=abc">岳母彩礼涨价逼跑新郎</a></h3>'
                      '<p class="txt-info">彩礼钱我和你爸出,不用你们还.</p></div>')
         got = _SOGOU_PAT.findall(fake_html)
