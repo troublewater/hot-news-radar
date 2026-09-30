@@ -192,8 +192,16 @@ def _sort_key(it):
     return (-_pick_score(it), -len(it["platforms"]), it["rank"])
 
 
+# 「XX 开售，4999 元」这类是电商稿，不是热点。用户被小米冰箱的稿子坑过。
+# 以后再遇到新的带货句式，往这一组词里加就行（判定只看标题）。
+_AD_HOT = re.compile(
+    r"开售|预售|首销|上架|开启预约|预约开启|正式开卖|新品首发|直降|立减|领券|券后|"
+    r"到手价|秒杀|包邮|清仓|满减|限时购|优惠力度")
+
+
 def split_channels(items):
     """把条目切成 (官方, 段子)。判定规则见上面的 _GOSSIP_* 。"""
+    items = [it for it in items if not _AD_HOT.search(it["title"])]
     official = [it for it in items if not is_gossip(it)]
     gossip = [it for it in items if is_gossip(it)]
     # 报告要是回到「全量模式」（只有一个「全部新闻」组），两类会一边倒成空，
@@ -235,6 +243,11 @@ font-size:28px;font-weight:800;color:#0b1020}
 .tag.hot{color:#ffd166;border-color:rgba(255,209,102,.5)}
 .tag.up{color:#5ee08a;border-color:rgba(94,224,138,.45)}
 .tag.down{color:#ff8f8f;border-color:rgba(255,143,143,.45)}
+.tag.solo{color:#98a4c6;border-color:rgba(152,164,198,.42)}
+.mx{display:flex;gap:6px}
+.mx b{font-weight:500;font-size:19px;color:#4c5678;border-radius:8px;padding:3px 10px;
+background:rgba(255,255,255,.06);white-space:nowrap}
+.mx b.on{color:#0b1020;font-weight:700;background:linear-gradient(135deg,#ffd166,#ff9f43)}
 footer{border-top:1px solid rgba(255,255,255,.14);padding-top:20px;display:flex;
 justify-content:flex-end;font-size:20px;color:#6f7da6;letter-spacing:1px}
 """
@@ -248,15 +261,25 @@ def render_card(items, site, now=None, top=8, handle=""):
     now = now or datetime.now()
     picked = items[:top]
     resonant = sum(1 for it in picked if len(it["platforms"]) > 1)
+    # 频道矩阵：列固定为「本批出现最多的几个频道」，上下几行的方块才能对齐着看，
+    # 哪条是全网共振、哪条只是单频道热门，扫一眼就知道，好决定搬哪条。
+    seen = {}
+    for it in items:                       # 按整张榜统计，不只看前 8 条
+        for p in it["platforms"]:
+            seen[p] = seen.get(p, 0) + 1
+    cols = [p for p, _ in sorted(seen.items(), key=lambda kv: (-kv[1], kv[0]))][:6]
 
     rows = []
     for i, it in enumerate(picked, 1):
-        # 平台名合成一个标签：逐平台一个标签会挤成 8~11 个，太长还会换行把下面
-        # 的徽章顶到第二行。只列前 3 个，数量交给「多平台共振 ×N」表达。
+        # 矩阵格子 = 本批的频道列；亮起的格子 = 这条在该频道上过榜
         names = it["platforms"]
-        tags = [_tag("", "+".join(names[:3]) + (" 等" if len(names) > 3 else ""))]
-        if len(it["platforms"]) > 1:
-            tags.append(_tag("hot", f"多平台共振 ×{len(it['platforms'])}"))
+        cells = "".join(
+            f'<b class="{"on" if c in names else ""}">{html.escape(c)}</b>' for c in cols)
+        tags = [f'<span class="mx">{cells}</span>']
+        if len(names) > 1:
+            tags.append(_tag("hot", f"多平台共振 ×{len(names)}"))
+        elif cols:
+            tags.append(_tag("solo", "单频道热门"))
         if it["rank"] < 9999:
             tags.append(_tag("", f"第 {it['rank']} 位"))
         # 只标「上升」。上游把几乎整张榜都算成 down（实测 137 条里 23 down / 2 up），
@@ -416,7 +439,7 @@ def _get(url, timeout=25, referer=""):
 # 但它的跳转页里藏着真实文章地址，只是被 JS 拆成小段防爬；拼回来就能打开原文，
 # 从正文容器里取出从开头连续的几段。实测这条路走得通。
 _ARTICLE_HEAD = re.compile(r"转自|公众号|点击上方|关注我们|来源[:：]|作者[:：]|微信号|阅读原文")
-_ARTICLE_CHARS = 420                               # 取多少字：两三个自然段，再多就是搬运了
+_ARTICLE_CHARS = 560          # 取多少字：够把「引子之后的正文」也包进来，再多就是搬运了
 _HEAD_END = "）)▼】」"
 
 
@@ -458,6 +481,23 @@ def _cut_sentences(text, chars=_ARTICLE_CHARS):
 _ARTICLE_BYTES = 1_200_000          # 正文容器在 500 KB 附近，读 400 KB 会正好切掉
 
 
+def _drop_lead_dialogue(text):
+    """公众号爱拿对话当引子：「阿达，太巧了吧！我家也是这样的！」
+
+    没有人物、没有事，接在标题后面就像半截评论。开头连着几组引语就整组丢，
+    直到露出正文为止。
+    """
+    for _ in range(4):                                  # 开头可能连着好几组
+        m = re.match(r'\s*[“"]([^“”"]{0,60})[”"]\s*', text)
+        if not m:
+            break
+        rest = text[m.end():]
+        if not re.search(r"[\w\u4e00-\u9fff]", rest):
+            break                                       # 后面没正文了，别把整篇吃光
+        text = rest
+    return text
+
+
 def fetch_article(url, chars=_ARTICLE_CHARS):
     """公众号正文。文章页 3 MB 起（前半是脚本和样式），读到正文容器就够。"""
     headers = dict(_HEADERS)
@@ -472,8 +512,8 @@ def fetch_article(url, chars=_ARTICLE_CHARS):
     block = re.search(r'(?s)id="js_content"[^>]*>(.*?)</div>\s*<div', raw)
     if not block:
         return ""
-    return _cut_sentences(_strip_article_head(
-        _clean_text(re.sub(r"<[^>]+>", " ", block.group(1)))), chars)
+    body = _clean_text(re.sub(r"<[^>]+>", " ", block.group(1)))
+    return _cut_sentences(_drop_lead_dialogue(_strip_article_head(body)), chars)
 
 
 def enrich_fulltext(stories, chars=_ARTICLE_CHARS):
@@ -554,7 +594,8 @@ def _paragraphs(text, budget=52, max_par=6):
     """
     pieces = []
     for sent in re.split(r"(?<=[。！？…])", text):
-        sent = sent.strip()
+        # 断句断在引号里时，下一片会以孤零零的右引号开头，先把这尾巴摘掉
+        sent = sent.strip().lstrip("”’\"」）】").strip()
         if not sent or not re.search(r"[\w\u4e00-\u9fff]", sent):
             continue                                   # 纯标点的碎片不算一段
         if len(sent) <= budget:
@@ -889,7 +930,19 @@ def main():
         long3 = [{"title": "测试条目", "url": "https://example.com",
                   "platforms": ["甲", "乙", "丙", "丁", "戊"], "rank": 9, "trend": "", "count": ""}]
         card3 = render_card(long3, args.site, handle="@demo")
-        assert "甲+乙+丙 等" in card3 and "丁" not in card3, "长平台列表没截断"
+        # 频道矩阵：列取本批出现最多的频道，亮格 = 这条在该频道上过榜。
+        # 单频道的单独标出来，一眼能挑出全网共振的那几条。
+        mx = render_card([
+            {"title": "两频道", "url": "u", "platforms": ["微博", "知乎"], "rank": 1,
+             "trend": "", "count": ""},
+            {"title": "单频道", "url": "u", "platforms": ["微博"], "rank": 2,
+             "trend": "", "count": ""},
+        ], args.site, handle="@demo")
+        assert mx.count('class="mx"') == 2, "每条都该有频道矩阵"
+        assert '<b class="on">微博</b>' in mx, "矩阵亮格没渲染"
+        assert '<b class="">知乎</b>' in mx, "矩阵暗格没渲染"
+        assert "单频道热门" in mx, "单频道的条目没被单独标出来"
+        assert card3.count('class="mx"') == 1, "卡片没带频道矩阵"
         # 报告是多平台合并成一个 span（+ 连接），这条守住解析不再退化成 1 个平台
         joined = parse_items(
             '<div class="word-group"><div class="word-name">微博热搜</div>'
@@ -914,6 +967,15 @@ def main():
         assert not is_gossip({"title": "中国男子百米接力夺冠"}), "光有「男子」不该算段子"
         assert not is_gossip({"title": "4家公司今日官宣回购"}), "「官宣」不该算段子"
         assert is_gossip({"title": "司机接到盲人乘客两人聊着聊着都哭了"}), "弱特征+故事动词没算成段子"
+        # 电商稿（「XX 开售，4999 元」）不是热点，不能占卡片位置
+        assert _AD_HOT.search("小米“米家冰箱 Pro 439L 法式自动制冰”开售，4999 元"), "电商稿没被识别"
+        assert not _AD_HOT.search("OpenAI 应战 Meta：发布个人 AI 助手 Dots"), "别把真新闻当广告"
+        mixed = [{"title": "米家冰箱开售，4999 元", "url": "u", "platforms": ["微博"],
+                  "rank": 1, "trend": "", "count": ""},
+                 {"title": "真新闻一条测试标题", "url": "u", "platforms": ["微博"],
+                  "rank": 2, "trend": "", "count": ""}]
+        assert [x["title"] for x in split_channels(mixed)[0]] == ["真新闻一条测试标题"], \
+            "电商稿没从卡片板块里剔掉"
 
         # 排他性：同为 2 平台时，「上升 + 中段名次」要压过「榜首」
         top1 = {"title": "榜首", "group": "x", "platforms": ["甲", "乙"], "rank": 1, "trend": "", "count": ""}
@@ -951,6 +1013,9 @@ def main():
         paras = _paragraphs("第一句。第二句。第三句。第四句。第五句。第六句。第七句。")
         assert len(paras) == 4 and all(len(p) <= 60 for p in paras), paras
         assert _paragraphs("。") == [] and _paragraphs("") == [], "空输入不该切出段落"
+        # 断句断在引号里时，下一段会以孤零零的右引号开头，要摘掉
+        assert not any(p.startswith("”") for p in _paragraphs(
+            "“阿达，太巧了吧！我家也是这样的！” 后面讲的是正文。又一句。")), "段落开头留了孤零零的右引号"
         assert _paragraphs("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十，后半句"), \
             "没有句号的长句也要能断"
         hupu = [{"title": "虎扑一条", "desc": "楼主说了一句话。又补了一句。",
@@ -964,6 +1029,14 @@ def main():
         assert _wechat_url_from(fake_js) == "https://mp.weixin.qq.com/s?src=11", _wechat_url_from(fake_js)
         assert _strip_article_head("本文转自公众号：路上读书 （ID：x） ▼ 这几天都在追剧。第二句。") \
             == "这几天都在追剧。第二句。"
+        # 对话引子（没人物没事）要整组丢掉，露出来的才是正文
+        assert _drop_lead_dialogue(
+            "“阿达，太巧了吧！我家也是这样的！” “不是吧，你老妈也是这样？” 每当新疆人聊到妈妈，大家总有话说。"
+        ).startswith("每当新疆人聊到妈妈"), "对话引子没被丢掉"
+        assert _drop_lead_dialogue("正文开头就是正文。第二句。") == "正文开头就是正文。第二句。", \
+            "没有引子时不该乱切"
+        assert _drop_lead_dialogue("“短”") == "“短”", "整篇都是引语时不该吃光"
+        assert _ARTICLE_CHARS >= 500, "正文取太短就只剩引子了"
         assert _cut_sentences("第一句。第二句。第三句。", chars=10) == "第一句。第二句。", \
             _cut_sentences("第一句。第二句。第三句。", chars=10)
         assert _story_key({"title": "脑洞故事", "desc": "d" * 100}) \
