@@ -177,7 +177,8 @@ def main():
     copy_text = copy_path.read_text(encoding="utf-8")
 
     site = args.site.rstrip("/")
-    image_url = args.image_url or (f"{site}/x/card.png?v={now:%m%d%H}" if site else "")
+    # 版本号精确到分钟：同一天几次推送若共用同一个 URL，飞书会拿缓存，看到的是旧卡片图
+    image_url = args.image_url or (f"{site}/x/card.png?v={now:%m%d%H%M}" if site else "")
 
     payload = build_payload(build_content(copy_text, image_url, site, now))
     try:
