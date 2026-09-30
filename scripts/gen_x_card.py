@@ -901,19 +901,33 @@ _AI_FEWSHOT = """范文一：
 看起来像生意，其实更像一项必须保留的服务。"""
 
 
+def _yaml_ai():
+    """从 config/config.yaml 的 ai: 段里捞 api_key / model / api_base。
+
+    写故事这个活儿对模型要求不低：免费的 glm-4-flash 只会把新闻复述一遍。
+    用户想换模型不必去动 GitHub Secrets，改 config.yaml 里的 ai.model / ai.api_base 就行。
+    """
+    cfg = {}
+    try:
+        text = (Path(__file__).resolve().parent.parent / "config" / "config.yaml").read_text(
+            encoding="utf-8", errors="ignore")
+    except OSError:
+        return cfg
+    for key in ("api_key", "model", "api_base"):
+        m = re.search(r"^\s*" + key + r":\s*[\"']?([^\"'\s#]+)", text, re.M)
+        if m:
+            cfg[key] = m.group(1).strip()
+    return cfg
+
+
 def _ai_config():
-    """key/base/model 走环境变量；没配就退回仓库 config.yaml 里的智谱默认。"""
-    key = os.environ.get("AI_API_KEY", "").strip()
-    base = os.environ.get("AI_API_BASE", "").strip() or _AI_BASE
-    model = os.environ.get("AI_MODEL", "").strip() or _AI_MODEL
-    if not key:                                  # 环境变量没给，从 yaml 里捞一把
-        try:
-            cfg = (Path(__file__).resolve().parent.parent / "config" / "config.yaml").read_text(
-                encoding="utf-8", errors="ignore")
-            m = re.search(r"^\s*api_key:\s*[\"']?([^\"\'\s#]+)", cfg, re.M)
-            key = (m.group(1) if m else "").strip()
-        except OSError:
-            key = ""
+    """环境变量优先，其次 config.yaml，最后退回智谱默认。"""
+    y = _yaml_ai()
+    key = os.environ.get("AI_API_KEY", "").strip() or y.get("api_key", "")
+    base = (os.environ.get("AI_API_BASE", "").strip()
+            or y.get("api_base", "") or _AI_BASE)
+    model = (os.environ.get("AI_MODEL", "").strip()
+             or y.get("model", "") or _AI_MODEL)
     if model.startswith("openai/"):              # LiteLLM 前缀，直连时要去掉
         model = model.split("/", 1)[1]
     return key, base.rstrip("/"), model
