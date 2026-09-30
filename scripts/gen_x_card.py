@@ -854,7 +854,10 @@ _MARKS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩",
 # 不求真实，只要好看。这活儿规则做不了，交给模型。
 # key / base / model 沿用仓库已有的 AI_* 配置（用户已在 Secrets 里配好）。
 _AI_BASE = "https://open.bigmodel.cn/api/paas/v4"
-_AI_MODEL = "glm-4-flash"
+# 写故事这个活儿对模型有要求：glm-4-flash 只会把新闻复述一遍、还经常只写一段。
+# 按强弱依次试，哪个能回话就用哪个（配额/改名都不至于整批作废）。
+_AI_MODEL_FALLBACKS = ["glm-4.7-flash", "glm-4.5-flash", "glm-4-flash"]
+_AI_MODEL = _AI_MODEL_FALLBACKS[0]
 _AI_BATCH = 4                    # 一次 4 条：一次要太多会撞输出上限，JSON 被截断就整批作废
 _AI_TIMEOUT = 180
 _FREQ_PATH = Path(__file__).resolve().parent.parent / "config" / "frequency_words.txt"
@@ -918,7 +921,7 @@ def _yaml_ai():
             encoding="utf-8", errors="ignore")
     except OSError:
         return cfg
-    for key in ("api_key", "model", "api_base"):
+    for key in ("api_key", "model", "api_base", "x_writer_model"):
         m = re.search(r"^\s*" + key + r":\s*[\"']?([^\"'\s#]+)", text, re.M)
         if m:
             cfg[key] = m.group(1).strip()
@@ -931,8 +934,9 @@ def _ai_config():
     key = os.environ.get("AI_API_KEY", "").strip() or y.get("api_key", "")
     base = (os.environ.get("AI_API_BASE", "").strip()
             or y.get("api_base", "") or _AI_BASE)
+    # 写故事可以单独指定模型（ai.x_writer_model）：爬虫的 AI 分析用什么跟这里无关
     model = (os.environ.get("AI_MODEL", "").strip()
-             or y.get("model", "") or _AI_MODEL)
+             or y.get("x_writer_model", "") or y.get("model", "") or _AI_MODEL)
     if model.startswith("openai/"):              # LiteLLM 前缀，直连时要去掉
         model = model.split("/", 1)[1]
     return key, base.rstrip("/"), model
@@ -1024,6 +1028,15 @@ def _normalize_quotes(text):
     return "".join(out)
 
 
+def _ai_ok(item):
+    """弱模型爱交差：只写一段、或者四段每段一句话，读起来跟标题没区别。
+
+    宁可少几条，也别把这种残次品塞进文案（用户之前就嫌「看不到内容」）。"""
+    paras = item.get("paras") or []
+    total = sum(len(p) for p in paras)
+    return len(paras) >= 3 and total >= 150
+
+
 def _ai_parse(text):
     """模型爱加说明、```json 围栏，还可能写到一半被输出上限截断。
 
@@ -1074,6 +1087,7 @@ def ai_write_stories(items, seeds, top, now=None):
     topics = _hook_topics(items, min(40, max(16, top * 2)))
     if not topics:
         return []
+    models = [model] + [m for m in _AI_MODEL_FALLBACKS if m != model]
     # 抓到的那批素材当「事实毛坯」递过去：模型改编时手上有细节，不至于全靠编
     seeds = [{"标题": s["title"], "正文": s["desc"][:400]} for s in (seeds or [])[:top]]
     wrote = []
@@ -1103,8 +1117,16 @@ def ai_write_stories(items, seeds, top, now=None):
             "", '只输出 JSON 数组：[{"title": "开场钩子", "paras": ["第一段", "第二段"]}]，'
                 "数组长度必须是 %d，不要任何解释，不要用 ``` 包裹。" % len(batch),
         ]
-        got = _ai_parse(_ai_call(key, base, model, _AI_SYSTEM, "\n".join(user)))
+        got = []
+        for cand in models:                     # 第一个有回话的模型认下来，之后不再换
+            raw = _ai_call(key, base, cand, _AI_SYSTEM, "\n".join(user))
+            if raw.strip():
+                model, models = cand, [cand]
+                got = [x for x in _ai_parse(raw) if _ai_ok(x)]
+                if got:
+                    break
         if not got:
+            print("  ⚠️ AI 这批没写出合格的（至少 3 段、150 字），跳过")
             break
         wrote += got
         print(f"  AI 改写：{len(batch)} 条话题 -> 成稿 {len(got)} 条")
