@@ -237,8 +237,8 @@ font-size:28px;font-weight:800;color:#0b1020}
 .n7{background:linear-gradient(135deg,#ffc48a,#f97316)}
 .n8{background:linear-gradient(135deg,#a5b4fc,#6366f1)}
 .body{flex:1;min-width:0}
-.txt{font-size:36px;font-weight:700;line-height:1.28;letter-spacing:.5px;display:block}
-.tags{margin-top:11px;display:flex;gap:10px;flex-wrap:wrap}
+.txt{font-size:36px;font-weight:700;line-height:1.28;letter-spacing:.5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tags{margin-top:11px;display:flex;gap:10px;flex-wrap:nowrap;overflow:hidden}
 .tag{font-size:20px;color:#a8b8e4;border:1px solid rgba(255,255,255,.24);border-radius:999px;padding:4px 16px}
 .tag.hot{color:#ffd166;border-color:rgba(255,209,102,.5)}
 .tag.up{color:#5ee08a;border-color:rgba(94,224,138,.45)}
