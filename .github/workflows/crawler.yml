@@ -82,6 +82,9 @@ jobs:
       AI_API_KEY: ${{ secrets.AI_API_KEY }}
       AI_MODEL: ${{ secrets.AI_MODEL }}
       AI_API_BASE: ${{ secrets.AI_API_BASE }}
+      # 板块二（X 文案）改写可以单独接一家供应商（DeepSeek 等）。
+      # 不填就沿用 AI_API_KEY 那套，爬虫自己的 AI 分析不受影响。
+      X_WRITER_API_KEY: ${{ secrets.X_WRITER_API_KEY }}
       # AI 功能级开关（2026-09-09 复盘补映射：用户已配 AI_DEDUP_ENABLED secret，
       # 但本 env 块未注入导致开关从未生效——功能级 env 必须在此显式声明）
       AI_DEDUP_ENABLED: ${{ secrets.AI_DEDUP_ENABLED }}
