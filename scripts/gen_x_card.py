@@ -33,6 +33,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -977,10 +978,11 @@ def _load_topic_words():
     return {k: v for k, v in groups.items() if k and v}
 
 
-def _hook_topics(items, limit):
+def _hook_topics(items, limit, bang=None):
     """今天哪几个母题在发酵：返回 [(母题, [今天的风向标题...])]。
 
     给模型的不是「照这个标题写」，而是「这个方向今天有人在聊」，免得写成新闻复述。
+    bang 是爆款源样本（fetch_bangdan 的结果），可以不给。
     """
     groups = _load_topic_words()
     hits = {}
@@ -991,11 +993,218 @@ def _hook_topics(items, limit):
         for g, words in groups.items():
             if any(w in t for w in words):
                 hits.setdefault(g, []).append((len(it["platforms"]), t))
+    # 爆款源反向加权：哪几类题材今天在 X 上正跑得动，对应母题就往前排。
+    # 这是「爆款源 → 新闻源」那一半闭环：选题方向跟着爆款风向走，不是拍脑袋。
+    boost = {}
+    if bang:
+        for g, words in groups.items():
+            boost[g] = sum(1 for r in bang[:150] if any(w in r.get("text", "") for w in words))
     out = []
-    for g, rows in sorted(hits.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+    # 权重是拍的：爆款一天上百条、热搜一个母题撑死几条，不放大完全主导不了排序。
+    def rank(kv):
+        g, rows = kv
+        return (-(min(boost.get(g, 0), 20) * 3 + len(rows) * 4), g)
+
+    for g, rows in sorted(hits.items(), key=rank):
         rows = sorted(set(rows), reverse=True)[:2]
         out.append((g, [t for _, t in rows]))
     return out[:limit]
+
+
+# ── 爆款源：xbangdan.com（X 中文区数据门户）────────────────────────────
+# 用户的设定：hot-news-radar 是「新闻源」，xbangdan.com 是「爆款源」。
+# 每天抓一次爆款源的真实数据（只抓 /hot.json：24 小时曝光榜 + 增速榜各 200 条、
+# 免鉴权），量出「今天 X 上跑得动的是哪几类开头、什么节奏、哪些题材」，然后：
+#   1. 用这批真开头和钩子分布约束板块二改写（爆款源 → 飞书文案）
+#   2. 用爆款题材分布给母题加权，决定今天优先写哪几类（爆款源 → 新闻源选题）
+#   3. 落一份 x/bangdan.md：风向 + 对标账号 + 词库建议，照着更新 frequency_words.txt
+# 抓不到不能让整条流水线挂掉，所以这一整段都是 fail-soft。
+#
+# 识别表来自 hooksupdate.md 第五节的「X 榜单爆款钩子 / 内容风格」两批 20+8 类。
+# 只做规则匹配、不调模型分类：分类这活儿模型不稳，还得额外花钱。
+_BD_HOT = "https://xbangdan.com/hot.json"
+
+# 备忘录自带的 15 类钩子：基本都是字面词，命中率最高，所以排在前面先匹。
+# 实测（2026-10-06 抓的 200 条）：只按榜单那 20 类结构写，六成以上样本落到
+# 「无钩子」——真实推文没那么多套路，靠这批字面钩子才量得出分布。
+_BD_HOOKS = [
+    ("求科普", r"不懂就问|我想问|想问下|求科普|求解答|这是什么"),
+    ("冷知识反差", r"冷知识|热知识|第一次知道|第一次见"),
+    ("没想明白", r"没想明白|想不明白|搞不懂|没搞懂"),
+    ("我查了一下", r"我查了一下|查了下|特意查"),
+    ("谁懂啊", r"谁懂啊|谁懂"),
+    ("不敢信", r"不敢信"),
+    ("震惊质疑", r"卧槽|太恐怖|真的假的"),
+    ("暴论", r"暴论"),
+    ("破防", r"破防"),
+    ("呆住", r"呆住|愣住了|看愣了"),
+    ("网传", r"网传"),
+    ("据说", r"据说|听说|朋友发给我的|有人说"),
+    ("来源背书", r"^(据|纽约时报|路透|彭博|华尔街日报|新华社|财新)"),
+    ("场景代入", r"^(我|朋友|同事|昨天|那天|有次|上一?次|一位|一名|某)"),
+    ("暴论反问", r"(为什么|凭什么|怎么还).*[？?]\s*$"),
+    ("行情快报", r"(重回|站上|跌破|涨破|新高|新低).{0,8}\d"),
+    ("数字盘点", r"^(我(整理|汇总)了|\d+\s*(种|个|条|款|张))"),
+    ("连载续集", r"续集|上集|后续来了"),
+    ("求做求购", r"哪里有卖|大佬.{0,6}(做|搞)一?[个下]|怎么做的|如何(盈利|赚钱)"),
+    ("顿悟断言", r"当你(意识到|明白)"),
+    ("极端定性", r"绝对|史上(最|第一)|最(惨|离谱|牛|强|恶心)"),
+    ("金句开路", r"你是?为(了)?.{0,10}还是"),
+    ("事件+情绪", r"太(无耻|离谱|恶心|震撼|过分)了|太过分"),
+    ("反差反转", r"结果|没想到|本以为"),
+    ("民间情绪", r"谁说|都这样|现在的人|说了跟没说一样|憋半天"),
+]
+
+# 内容风格 8 类（同一节）。今天哪类占比高，板块二改写就往哪类靠。
+_BD_STYLES = [
+    ("行情喊单", r"美元|比特币|BTC|ETH|涨|跌|仓位|上车"),
+    ("家庭日常", r"我妈|我爸|老婆|老公|孩子|儿子|女儿|侄女|婆婆|丈母娘"),
+    ("快讯播报", r"据|报道|记者|发布会|官宣|宣布"),
+    ("奇观猎奇", r"保养|现场|画面|照片|奇观|罕见|第一次见"),
+    ("都市夜话", r"^我|听说|朋友|同事|那天|有次"),
+    ("暴论观点", r"为什么|凭什么|根本|其实|本质上"),
+    ("金句感悟", r"你是?为(了)?|人生|世界|意义"),
+    ("民间共鸣", r"都这样|现在的人|大家|谁不|普通人"),
+]
+
+
+def fetch_bangdan(timeout=45):
+    """抓 X 中文区当日爆款。返回 [{handle,name,text,v,r,l,age,cat}]，失败返回 []。"""
+    try:
+        req = urllib.request.Request(_BD_HOT, headers=_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "ignore"))
+    except Exception as exc:        # noqa: BLE001 - 抓不到就走老路，不能拖垮流水线
+        print(f"  ⚠️ 爆款源没抓到（{type(exc).__name__}: {exc}）")
+        return []
+    rows, seen = [], set()
+    for key in ("rate", "views"):   # 增速榜 + 曝光榜，去重后按曝光排
+        for it in data.get(key) or []:
+            text = re.sub(r"https?://\S+", "", it.get("t") or "").strip()
+            if len(text) < 6 or text[:6] in seen:
+                continue
+            seen.add(text[:6])      # 两榜大量重叠，同一段开头只留一条
+            rows.append({"handle": it.get("h", ""), "name": it.get("n", ""), "text": text,
+                         "v": int(it.get("v") or 0), "r": int(it.get("r") or 0),
+                         "l": int(it.get("l") or 0), "age": it.get("age") or 0,
+                         "cat": it.get("c") or "none"})
+    rows.sort(key=lambda x: -x["v"])
+    if rows:
+        print(f"  ✅ 爆款源去重后 {len(rows)} 条，最高 {rows[0]['v']:,} 曝光")
+    else:
+        print("  ⚠️ 爆款源返回空")
+    return rows
+
+
+def _bd_named(common, n, skip="无钩子"):
+    """钩子榜里剔掉「无钩子」再取前 n 个——量不出来就别写进风向。"""
+    return [h for h, _ in common if h != skip][:n]
+
+
+def _bd_first(text, table):
+    for name, pat in table:
+        if re.search(pat, text):
+            return name
+    return ""
+
+
+def bangdan_fingerprint(rows, sample=60):
+    """今天的爆款长什么样：钩子分布 / 风格分布 / 正文长度 / 真开头。"""
+    rows = [r for r in (rows or []) if r.get("text")][:sample]
+    hooks, styles, cats = Counter(), Counter(), Counter()
+    for r in rows:
+        hooks[_bd_first(r["text"], _BD_HOOKS) or "无钩子"] += 1
+        styles[_bd_first(r["text"], _BD_STYLES) or "其他"] += 1
+        cats[r.get("cat") or "none"] += 1
+    lens = sorted(len(r["text"]) for r in rows) or [0]
+    return {"n": len(rows), "hooks": hooks.most_common(), "styles": styles.most_common(),
+            "cats": cats.most_common(), "len_mid": lens[len(lens) // 2],
+            "openers": [r["text"][:40].replace("\n", " ") for r in rows[:6]],
+            "tops": rows[:5]}
+
+
+# 高频词统计要拦掉的常见字，不拦的话三字窗全是「你可以」「这就是」这种
+_BD_STOP = "我们你们他们这个那个就是不是没有可以什么怎么因为所以但是真的现在自己一个两个很多知道其实已经"
+
+
+def _bd_terms(rows, n=3, top=12):
+    """爆款正文里的高频 N 字词，用来提示词库该补哪些词（纯滑窗计数，不引依赖）。"""
+    cnt = Counter()
+    for r in (rows or [])[:120]:
+        t = r["text"]
+        for i in range(len(t) - n + 1):
+            g = t[i:i + n]
+            if re.fullmatch(r"[\u4e00-\u9fff]{%d}" % n, g) and not any(c in _BD_STOP for c in g):
+                cnt[g] += 1
+    try:
+        library = _FREQ_PATH.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        library = ""
+    return [(g, c) for g, c in cnt.most_common(80) if c >= 3 and g not in library][:top]
+
+
+def _bangdan_prompt(fp):
+    """把爆款指纹压成给模型看的几行：今天跑得动的类型 + 几条真开头。"""
+    return [
+        "", "今天的爆款风向（xbangdan.com 抓的 X 中文区实时数据）——照这个口味写，"
+            "但人、事、数字必须是新编的：",
+        "- 今天跑得动的开头类型：" + "、".join(_bd_named(fp["hooks"], 5)),
+        "- 爆款正文中位 %d 字：短句、短段，越短越猛" % fp["len_mid"],
+        "- 真开头（只学口气和节奏，不许复用里面的人和事）：",
+    ] + ["    " + t for t in fp["openers"][:4]]
+
+
+def render_bangdan(rows, now=None):
+    """爆款风向备忘：给模型看的那套东西，也给人留一份（x/bangdan.md）。"""
+    now = now or datetime.now()
+    fp = bangdan_fingerprint(rows)
+    out = [f"# 爆款风向 · {now:%Y-%m-%d}", "",
+           f"来源：xbangdan.com（X 中文区 24 小时曝光榜 + 增速榜，采样 {fp['n']} 条）", ""]
+    if not fp["n"]:
+        return "\n".join(out + ["⚠️ 今天没抓到爆款源，这一轮没参考它（不影响出稿）。"]) + "\n"
+    top_hooks = "、".join(_bd_named(fp["hooks"], 4)) or "没量出明显套路"
+    out += [f"风向：X 上今天跑得动的是 {top_hooks} 这类开头；爆款正文中位 {fp['len_mid']} 字。", "",
+            "## 今天的真开头（照这个口气写，别抄内容）"]
+    out += [f"- {t}" for t in fp["openers"][:6]]
+    out += ["", "## 开头钩子分布"] + [f"- {h} × {n}" for h, n in fp["hooks"][:6]]
+    out += ["", "## 内容风格分布"] + [f"- {s} × {n}" for s, n in fp["styles"][:5]
+                             if s != "其他"]
+    out += ["", "## 今天曝光最高的（对标）"]
+    out += [f"- {r['name'] or r['handle']} @{r['handle']}：{r['v']:,} 曝光 / "
+            f"{r['l']:,} 赞 — {r['text'][:40]}" for r in fp["tops"]]
+    terms = _bd_terms(rows)
+    if terms:
+        out += ["", "## 词库建议（爆款里高频、frequency_words.txt 里还没有的）",
+                "看哪个组合适就加进去，下一轮抓取就会跟着走：",
+                "- " + "  ".join(f"{g}({c})" for g, c in terms)]
+    return "\n".join(out) + "\n"
+
+
+# 每条帖子分一个开头钩子（hooksupdate.md 的钩子库）。一条一个、批内不重复、
+# 按日期轮换起始点——天天同一个起手式就是机器味。
+_WRITER_HOOKS = [
+    ("不懂就问", "不懂就问：这到底合不合规？"),
+    ("冷知识", "冷知识：这样操作是合法的。"),
+    ("热知识", "热知识：这事儿其实有明文规定。"),
+    ("暴论", "暴论：这事没人管才怪。"),
+    ("没想明白", "没想明白，为什么会这样？"),
+    ("网传", "网传……我先摆这儿。"),
+    ("据说", "据说当时就是这么处理的。"),
+    ("第一次知道", "第一次知道，原来还能这么干。"),
+    ("我查了一下", "我查了一下，这事有出处。"),
+    ("谁懂啊", "谁懂啊，这种操作真的离谱。"),
+    ("不敢信", "不敢信，这事是真的。"),
+    ("破防", "破防了，就为这点事。"),
+    ("呆住", "看完呆住，半天没说话。"),
+    ("求科普", "求科普，这算谁的责任？"),
+    ("数字盘点", "我给这事算了笔账。"),
+    ("反差反转", "本来以为就这么过去了，结果……"),
+    ("震惊质疑", "卧槽，真的假的？"),
+    ("事件+情绪", "这事儿办得太离谱了。"),
+    ("奇观直给", "原来这事是这么办的。"),
+    ("都市怪谈", "听说那天就没人管，我是不太信。"),
+]
+
 
 def _ai_call(key, base, model, system, user):
     """一次 chat/completions。返回正文文本，失败返回空串。"""
@@ -1118,15 +1327,16 @@ def ai_probe():
             print(f"  ❌ {model}：{type(exc).__name__} {detail}")
 
 
-def ai_write_stories(items, seeds, top, now=None):
+def ai_write_stories(items, seeds, top, now=None, bang=None):
     """把当天热搜话题交给模型，写成能单条发的隔断式故事。拿不到就返回空列表。"""
     key, base, model = _ai_config()
     if not key:
         print("  ⚠️ 没配 AI_API_KEY，跳过改写，退回抓来的原贴")
         return []
-    topics = _hook_topics(items, min(40, max(16, top * 2)))
+    topics = _hook_topics(items, min(40, max(16, top * 2)), bang=bang)
     if not topics:
         return []
+    fp = bangdan_fingerprint(bang) if bang else {}
     models = [model] + [m for m in _AI_MODEL_FALLBACKS if m != model]
     # 抓到的那批素材当「事实毛坯」递过去：模型改编时手上有细节，不至于全靠编
     seeds = [{"标题": s["title"], "正文": s["desc"][:400]} for s in (seeds or [])[:top]]
@@ -1153,8 +1363,19 @@ def ai_write_stories(items, seeds, top, now=None):
             user += ["", "已经发过的选题（换个角度写，别重复）：" + "、".join(x["title"] for x in wrote)]
         user += [
             "", f"把上面这 {len(batch)} 条母题各写成一条独立帖子，一条一个，顺序对应。",
-            "- title 是一到两句话的开场钩子，直接把事端出来。可以用这类起手式，但别每条都用同一个：",
-            "  不懂就问：…／冷知识：…／热知识：…／暴论：…／没想明白，…／我有一个朋友，…／我有一个 A8 的大哥，…",
+            "- title 是一到两句的开场钩子，直接把事端出来。",
+        ]
+        if fp.get("n"):
+            user += _bangdan_prompt(fp)
+        # 每条分一个开头钩子：按日期轮换起始点，批内不重复。
+        # 之前只在提示词里列一排起手式让模型自己挑，结果十条有八条都是「不懂就问」。
+        hoff = (now or datetime.now()).toordinal()
+        picks = [_WRITER_HOOKS[(hoff + start + n) % len(_WRITER_HOOKS)]
+                 for n in range(len(batch))]
+        user += [
+            f"- 这 {len(batch)} 条各分一个开头钩子，按顺序用，不许换、不许重复：",
+            "    " + "；".join(f"{n}. {h}（写成「{eg}」这个口气）"
+                               for n, (h, eg) in enumerate(picks, 1)),
             "- paras 是后面 4~6 段，每段 1~3 句，隔断式。",
             "", _AI_FEWSHOT,
             "", '只输出 JSON 数组：[{"title": "开场钩子", "paras": ["第一段", "第二段"]}]，'
@@ -1262,6 +1483,7 @@ def main():
     ap.add_argument("--story-top", type=int, default=30,
                     help="素材池放几条（都带正文，用户自己挑着一条条发）")
     ap.add_argument("--no-stories", action="store_true", help="不抓公众号故事，退回榜单标题")
+    ap.add_argument("--no-bangdan", action="store_true", help="不参考 xbangdan.com 爆款源")
     ap.add_argument("--no-ai", action="store_true", help="不做 AI 改编，直接发抓来的原贴")
     ap.add_argument("--ai-top", type=int, default=12, help="AI 改编几条（要 30 条得有人工挑）")
     ap.add_argument("--handle", default="", help="卡片右下角署名，如 @your_x_handle")
@@ -1482,6 +1704,38 @@ def main():
         assert len(got3) == 3 and sum(x.get("kw") == "AI 整活" for x in got3) == 2, \
             f"同一个搜索词的素材没被限流：{[x['title'] for x in got3]}"
         # 换个日期应该换一套说法，不然天天一个味
+        # 爆款源：风向全是规则量出来的，量错了整套改写方向跟着错，钉住它
+        fake_bd = [
+            {"handle": "a", "name": "甲", "text": "卧槽！这个也太离谱了", "v": 900,
+             "r": 1, "l": 1, "cat": "none"},
+            {"handle": "b", "name": "乙", "text": "冷知识：充电线还可以当鞋带", "v": 800,
+             "r": 1, "l": 1, "cat": "none"},
+            {"handle": "c", "name": "丙", "text": "为什么商场里的书店不倒闭？", "v": 700,
+             "r": 1, "l": 1, "cat": "finance"},
+        ]
+        bfp = bangdan_fingerprint(fake_bd)
+        assert bfp["n"] == 3 and bfp["openers"], bfp
+        assert dict(bfp["hooks"]) == {"震惊质疑": 1, "冷知识反差": 1, "暴论反问": 1}, bfp["hooks"]
+        assert dict(bfp["cats"]) == {"none": 2, "finance": 1}, bfp["cats"]
+        bmd = render_bangdan(fake_bd, now=datetime(2026, 10, 6, 8, 0))
+        assert "风向：" in bmd and "@a" in bmd and "震惊质疑" in bmd, bmd[:300]
+        # 抓不到爆款源要能正常出稿，不能抛异常
+        assert "没抓到" in render_bangdan([], now=datetime(2026, 10, 6, 8, 0))
+        assert bangdan_fingerprint(None)["n"] == 0
+        # 爆款题材反向加权：爆款里全在聊彩礼，彩礼婚恋就该压过热搜更多的职场
+        news2 = [{"title": "男子讨薪偷老板6千元被抓", "platforms": ["微博"], "rank": 1},
+                 {"title": "公司裁员不给赔偿", "platforms": ["微博"], "rank": 2},
+                 {"title": "年终奖缩水了", "platforms": ["微博"], "rank": 3},
+                 {"title": "彩礼谈崩了", "platforms": ["微博"], "rank": 9}]
+        plain = [g for g, _ in _hook_topics(news2, 5)]
+        bd2 = [{"handle": "x", "name": "x", "text": "这彩礼还能临时涨价", "v": 1,
+                "r": 0, "l": 0, "cat": "none"}] * 8
+        weighted = [g for g, _ in _hook_topics(news2, 5, bang=bd2)]
+        assert plain[0] == "职场" and weighted[0] == "彩礼婚恋", (plain, weighted)
+        # 钩子按日期轮换、批内不重复：批内撞车就是「十条八条不懂就问」那个毛病
+        d0 = datetime(2026, 10, 6).toordinal()
+        picks0 = [_WRITER_HOOKS[(d0 + n) % len(_WRITER_HOOKS)][0] for n in range(12)]
+        assert len(set(picks0)) == 12 and len(_WRITER_HOOKS) >= 15, picks0
         copy2 = render_copy(items, "https://example.com", now=datetime(2026, 9, 30, 8, 0))
         assert copy != copy2, "不同日期文案完全一样，等于没做变化"
         print(f"selftest OK — {len(items)} 条，首条：{items[0]['title'][:26]} "
@@ -1507,11 +1761,14 @@ def main():
     # 板块二：故事素材池 -> 每条单独发。正文来自 collect_stories（公众号 / 虎扑 / 贴吧）；
     # 抓不到才退回榜单标题——那样只有标题，信息量和卡片图没区别。
     stories = [] if args.no_stories else collect_stories(args.story_top)
+    # 爆款源：X 中文区的实时风向。抓不到就当没有，不影响出稿。
+    bang = [] if args.no_bangdan else fetch_bangdan()
+    (out / "bangdan.md").write_text(render_bangdan(bang), encoding="utf-8")
     # collect_stories 里已经补过正文（换不到原文的已丢掉），这里不用再补一次。
     # 板块二优先走 AI 改编：抓来的原贴读起来断章取义（摘要 + 几个热评拼在一起），
     # 用户要的是「热搜话题 -> 有人有事的小故事」。改写失败就退回原贴，不开天窗。
     ai_n = 0 if args.no_ai else args.ai_top
-    ai_stories = ai_write_stories(items, stories, ai_n) if ai_n else []
+    ai_stories = ai_write_stories(items, stories, ai_n, bang=bang) if ai_n else []
     posted = ai_stories or stories
     (out / "copy.txt").write_text(
         render_pool(posted, top=args.story_top) if posted
@@ -1536,6 +1793,12 @@ def main():
         src_note = "⚠️ 没抓到故事，退回榜单标题"
     print(f"板块二 素材      {src_note} -> {out/'copy.txt'}"
           f"，最长一条 {per} 字符 {warn}")
+    if bang:
+        fpb = bangdan_fingerprint(bang)
+        print(f"爆款源 风向      {fpb['n']:>3} 条样本 -> {out/'bangdan.md'}"
+              f"，跑得动：{'、'.join(_bd_named(fpb['hooks'], 4))}")
+    else:
+        print("爆款源 风向      ⚠️ 没抓到，这轮只按新闻源出稿")
     shown = (posted or sorted(items, key=_sort_key))[: args.story_top if posted else args.copy_top]
     for i, it in enumerate(shown, 1):
         print(f"  {i:>2}. {it['title'][:44]}")
