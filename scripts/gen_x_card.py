@@ -1231,7 +1231,32 @@ def render_bangdan(rows, now=None):
 
 # 每条帖子分一个开头钩子（hooksupdate.md 的钩子库）。一条一个、批内不重复、
 # 按日期轮换起始点——天天同一个起手式就是机器味。
-_WRITER_HOOKS = [
+def _load_hook_table():
+    """钩子表以 hooksupdate.md 为准——飞书豆包 / WorkBuddy / CodeBuddy 读的是同一份。
+
+    只认 <!-- MACHINE:HOOKS ... --> 里的「钩子名|起手式」行。文件没了或没标记就返回空，
+    由下面那份内置默认值兜底——缺个 md 不该把整条流水线搞挂。
+    """
+    try:
+        text = (Path(__file__).resolve().parent.parent / "hooksupdate.md").read_text(
+            encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    m = re.search(r"<!--\s*MACHINE:HOOKS\b(.*?)-->", text, re.S)
+    if not m:
+        return []
+    out = []
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "|" not in line:
+            continue
+        name, eg = (s.strip() for s in line.split("|", 1))
+        if name and eg:
+            out.append((name, eg))
+    return out
+
+
+_WRITER_HOOKS = _load_hook_table() or [
     ("不懂就问", "不懂就问：这到底合不合规？"),
     ("冷知识", "冷知识：这样操作是合法的。"),
     ("热知识", "热知识：这事儿其实有明文规定。"),
@@ -1751,6 +1776,8 @@ def main():
         assert not any(h in apool for h in _HOOK_SELF), "AI 故事不该再套模板钩子"
         assert "网友：" not in apool
         # 标题只抄例句的，等于什么都没写，得拦掉（弱模型爱这么交差）
+        assert len(_load_hook_table()) >= 15, \
+            "hooksupdate.md 的 MACHINE:HOOKS 没读到，钩子表退回内置默认值了"
         assert _title_bare("不懂就问：这到底合不合规？"), "抄例句的标题没被拦"
         assert _title_bare("卧槽，真的假的？"), "短得没信息的标题没被拦"
         assert not _title_bare("不懂就问：楼下装修三年没人管，物业说管不了"), \
