@@ -88,7 +88,7 @@ def bangdan_brief(path="docs/x/bangdan.md"):
     return m.group(1).strip()[:120] if m else ""
 
 
-def build_content(copy_text, image_url, site_url, now=None, brief=""):
+def build_content(copy_text, image_url, site_url, now=None, brief="", links=""):
     now = now or datetime.now(CN_TZ)
     # 首行固定含「热点」：飞书自定义机器人的关键词校验可用 批次,热点 两个词兜住
     parts = [f"📮 今日热点 · X 素材（{now.strftime('%m/%d')}）", ""]
@@ -99,10 +99,16 @@ def build_content(copy_text, image_url, site_url, now=None, brief=""):
         # 传外链会被拒收（11246 / invalid image keys）。自定义机器人拿不到 img_key，
         # 所以退成普通链接，点开即可看/下载。
         parts += ["【板块一 · 官方消息｜图】", f"[🖼 点此查看卡片图]({image_url})", ""]
+    if links:
+        # 标题行（# 开头的）丢掉：卡片上已经有标题了，这一段只要条目
+        body = "\n".join(l for l in links.splitlines() if not l.startswith("# ")).strip()
+        parts += ["【热榜原始链接 · 给豆包当素材】", body, ""]
     parts += ["【板块二 · 段子｜X 文案】", copy_text.strip()]
     if site_url:
         # 素材池是「一条一条发」用的，原文和出处单独放一份，方便自己改写
         parts += ["", f"[📄 二创素材（原文 + 出处）]({site_url}/x/sources.txt)",
+                  f"[🔗 热榜链接全文]({site_url}/x/links.txt)",
+                  f"[📘 二创规范 hooksupdate.md]({site_url}/x/hooksupdate.md)",
                   "", f"[打开站点]({site_url})"]
     return "\n".join(parts)
 
@@ -131,6 +137,8 @@ def post(webhook_url, payload, timeout=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--copy", default="docs/x/copy.txt", help="文案文件")
+    ap.add_argument("--links", default="docs/x/links.txt",
+                    help="热榜原始链接文件，整段附在推送里给豆包当素材")
     ap.add_argument("--site", default="", help="站点地址，用于图片链接和页脚链接")
     ap.add_argument("--brief", default="docs/x/bangdan.md",
                     help="爆款风向备忘，抽出行首的「风向：」附在推送里")
@@ -150,6 +158,15 @@ def main():
         withbrief = build_content("文案", "", "", brief="X 上今天跑得动的是 场景代入 这类开头。")
         assert "爆款风向：" in withbrief, "爆款风向行没加进去"
         assert "爆款风向" not in content, "没有风向时不该出现空的风向行"
+        # 热榜原始链接：整段附上给豆包二创，站点再留全文和规范
+        withlinks = build_content(
+            "文案", "", "https://example.com",
+            links="# 热榜原始链接 · 10-06\n（1 条 / 共 1 条）\n\n1. 标题\n   https://e.com/a")
+        assert "【热榜原始链接 · 给豆包当素材】" in withlinks, "链接段没加上"
+        assert "https://e.com/a" in withlinks, "链接正文丢了"
+        assert "# 热榜原始链接" not in withlinks, "链接段的标题行该丢掉"
+        assert "x/links.txt" in withlinks and "x/hooksupdate.md" in withlinks, \
+            "站点备查链接没加上"
         # 风向是可选增强：备忘丢了、或今天没抓到爆款源，都不能影响推送
         assert bangdan_brief("没有这个文件") == ""
         with tempfile.TemporaryDirectory() as td:
@@ -206,7 +223,11 @@ def main():
     image_url = args.image_url or (f"{site}/x/card.png?v={now:%m%d%H%M}" if site else "")
 
     brief = bangdan_brief(args.brief)
-    payload = build_payload(build_content(copy_text, image_url, site, now, brief))
+    try:
+        links_text = Path(args.links).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        links_text = ""             # 没这个文件就少一段，不影响推送
+    payload = build_payload(build_content(copy_text, image_url, site, now, brief, links_text))
     if not brief:
         print("  （没读到爆款风向，这轮不附风向行）")
     try:
