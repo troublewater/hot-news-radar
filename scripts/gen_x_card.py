@@ -82,7 +82,8 @@ def parse_items(report_html):
             link = _LINK_RE.search(chunk)
             if not link:
                 continue
-            url = link.group(1)
+            # 报告里的链接是 HTML 转义过的（贴吧那条带 &amp;topic_id），不反转义点开就断
+            url = html.unescape(link.group(1))
             title = html.unescape(re.sub(r"<[^>]+>", "", link.group(2))).strip()
             if len(title) < 4:
                 continue
@@ -1003,6 +1004,32 @@ def _load_topic_words():
     return {k: v for k, v in groups.items() if k and v}
 
 
+# 母题词表缓存在模块级：要读文件，一晚上要问几十次
+_TOPIC_WORDS = _load_topic_words()
+
+
+def _bang_boost(bang):
+    """今天每类母题在爆款里被提到几次。没抓到爆款源就返回空字典（等于不加权）。"""
+    if not bang:
+        return {}
+    return {g: sum(1 for r in bang[:150] if any(w in r.get("text", "") for w in words))
+            for g, words in _TOPIC_WORDS.items()}
+
+
+def _hot_topic(title, boost, floor=3):
+    """这条标题踩中了今天爆款里最热的哪个母题。没踩中返回空。
+
+    floor 是「算热」的门槛：爆款一天上百条，随便一个词都可能被提一次，
+    踩不到 3 次的不值得往前排。
+    """
+    if not title or not boost:
+        return "", 0
+    hits = [(c, g) for g, c in boost.items()
+            if c >= floor and g in _TOPIC_GROUPS
+            and any(w in title for w in _TOPIC_WORDS.get(g, []))]
+    return max(hits)[::-1] if hits else ("", 0)
+
+
 def _hook_topics(items, limit, bang=None):
     """今天哪几个母题在发酵：返回 [(母题, [今天的风向标题...])]。
 
@@ -1020,10 +1047,7 @@ def _hook_topics(items, limit, bang=None):
                 hits.setdefault(g, []).append((len(it["platforms"]), t))
     # 爆款源反向加权：哪几类题材今天在 X 上正跑得动，对应母题就往前排。
     # 这是「爆款源 → 新闻源」那一半闭环：选题方向跟着爆款风向走，不是拍脑袋。
-    boost = {}
-    if bang:
-        for g, words in groups.items():
-            boost[g] = sum(1 for r in bang[:150] if any(w in r.get("text", "") for w in words))
+    boost = _bang_boost(bang)
     out = []
     # 权重是拍的：爆款一天上百条、热搜一个母题撑死几条，不放大完全主导不了排序。
     def rank(kv):
@@ -1490,6 +1514,34 @@ def render_sources(stories, now=None):
     return "\n".join(out)
 
 
+def render_links(items, bang=None, top=30, now=None):
+    """热榜原始链接：给飞书里的豆包当二创素材（我们出链接，它按 hooksupdate.md 改写）。
+
+    排序沿用板块二那套（共振 + 排他性），再叠爆款源的风向加权：今天 X 上跑得动的
+    题材往前排并标火——这就是「爆款源反过来调热门链接」那一环。
+    链接抓来什么样就什么样，不改写、不删减，挑哪条由豆包自己决定。
+    """
+    now = now or datetime.now()
+    boost = _bang_boost(bang)
+    rows = []
+    for it in items:
+        if not it.get("url") or _AD_HOT.search(it["title"]):
+            continue                       # 没链接的、电商稿，都不算素材
+        hot = bool(_hot_topic(it["title"], boost)[1])
+        rows.append((0 if hot else 1, _sort_key(it), it, hot))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    out = ["# 热榜原始链接 · %s" % now.strftime("%Y-%m-%d"),
+           "（%d 条 / 共 %d 条；%s=今天 X 上跑得动的题材，%d 条）"
+           % (min(len(rows), top), len(rows), '🔥', sum(1 for r in rows if r[3])), ""]
+    for n, (_p, _k, it, hot) in enumerate(rows[:top], 1):
+        meta = " · ".join(x for x in ((it.get("group") or ""),
+                                      "+".join(it["platforms"][:4])) if x)
+        out.append("%d. %s%s" % (n, '🔥' + " " if hot else "", it["title"]))
+        out.append("   " + meta)
+        out.append("   " + it["url"])
+    return "\n".join(out) + "\n"
+
+
 def render_copy(items, site, now=None, top=25):
     """板块二 X 文案：一篇帖子，不是三条。
 
@@ -1525,6 +1577,8 @@ def main():
     ap.add_argument("--site", default=DEFAULT_SITE)
     ap.add_argument("--top", type=int, default=8)
     ap.add_argument("--copy-top", type=int, default=25, help="X 文案里列几条")
+    ap.add_argument("--link-top", type=int, default=30,
+                    help="飞书里发几条热榜原始链接（给豆包当二创素材）")
     ap.add_argument("--story-top", type=int, default=30,
                     help="素材池放几条（都带正文，用户自己挑着一条条发）")
     ap.add_argument("--no-stories", action="store_true", help="不抓公众号故事，退回榜单标题")
@@ -1585,6 +1639,14 @@ def main():
             joined and joined[0]["platforms"],
         )
         assert joined[0]["group"] == "微博热搜", "条目所属的关键词组名没解析出来"
+        # 链接里的 HTML 转义要还原，否则贴吧那条会点成坏链
+        ent = parse_items(
+            '<div class="word-group"><div class="word-name">微博热搜</div>'
+            '<div class="news-item"><span class="source-name">微博</span>'
+            '<a href="https://tieba.baidu.com/x?topic_name=a&amp;topic_id=7" '
+            'class="news-link">测试标题四个字</a></div></div>')
+        assert ent[0]["url"] == "https://tieba.baidu.com/x?topic_name=a&topic_id=7", \
+            ent[0]["url"]
         assert all(it["group"] for it in items), "报告里解析出了没有关键词组的条目"
 
         # 分板块：强特征词直接算段子；弱特征词要配上有故事的动词，别把体育/时政误伤
@@ -1771,6 +1833,28 @@ def main():
         ssrc = render_sources(stories, now=datetime(2026, 9, 29, 8, 0))
         assert "二创素材" in ssrc and "https://example.com/a" in ssrc, "素材文件没带原文链接"
         assert render_pool([], top=5).strip() == "", "空素材不该吐东西"
+        # 热榜原始链接：给飞书里的豆包当二创素材，得带链接、带平台、拦电商稿
+        lk_items = [
+            {"title": "女子相亲被要20万彩礼", "url": "https://e.com/a", "group": "彩礼婚恋",
+             "platforms": ["微博", "知乎"], "rank": 1, "trend": "", "count": ""},
+            {"title": "小米冰箱开售，4999 元", "url": "https://e.com/b", "group": "",
+             "platforms": ["微博"], "rank": 1, "trend": "", "count": ""},
+        ]
+        lk = render_links(lk_items, now=datetime(2026, 10, 6, 8, 0))
+        assert "https://e.com/a" in lk and "女子相亲被要20万彩礼" in lk, lk
+        assert "4999" not in lk, "电商稿不该进链接清单"
+        assert "微博+知乎" in lk, "平台没带上"
+        # 爆款风向要给链接加权：今天 X 上全在聊彩礼，带彩礼那条就得往前排
+        bd3 = [{"handle": "x", "name": "x", "text": "这彩礼又涨了", "v": 1,
+                "r": 0, "l": 0, "cat": "none"}] * 5
+        lk2 = render_links(lk_items + [
+            {"title": "公司裁员不给赔偿", "url": "https://e.com/c", "group": "职场",
+             "platforms": ["微博", "贴吧", "知乎"], "rank": 1, "trend": "up", "count": ""},
+        ], bang=bd3, now=datetime(2026, 10, 6, 8, 0))
+        assert lk2.index("女子相亲被要20万彩礼") < lk2.index("公司裁员不给赔偿"), lk2
+        assert "\U0001F525" in lk2, "爆款题材没标出来"
+        assert "1." not in render_links([], now=datetime(2026, 10, 6, 8, 0)), \
+            "没素材时不该列出条目"
         assert _story_key({"title": "彩礼纠纷", "desc": "d" * 100}) \
             > _story_key({"title": "无关故事", "desc": "d" * 100}), "婚嫁家事没被排到后面"
         assert _story_ok("彩礼涨价了") is False, "太短的摘要不该算故事"
@@ -1852,6 +1936,10 @@ def main():
     # 爆款源：X 中文区的实时风向。抓不到就当没有，不影响出稿。
     bang = [] if args.no_bangdan else fetch_bangdan()
     (out / "bangdan.md").write_text(render_bangdan(bang), encoding="utf-8")
+    # 二创规范（hooksupdate.md）也复制一份到站点：豆包那边读同一个 URL，两边就同一份
+    memo = Path(__file__).resolve().parent.parent / "hooksupdate.md"
+    if memo.is_file():
+        (out / "hooksupdate.md").write_bytes(memo.read_bytes())
     # collect_stories 里已经补过正文（换不到原文的已丢掉），这里不用再补一次。
     # 板块二优先走 AI 改编：抓来的原贴读起来断章取义（摘要 + 几个热评拼在一起），
     # 用户要的是「热搜话题 -> 有人有事的小故事」。改写失败就退回原贴，不开天窗。
@@ -1862,6 +1950,8 @@ def main():
         render_pool(posted, top=args.story_top) if posted
         else render_copy(items, args.site, top=args.copy_top), encoding="utf-8")
     (out / "sources.txt").write_text(render_sources(stories or ai_stories), encoding="utf-8")
+    (out / "links.txt").write_text(
+        render_links(items, bang=bang, top=args.link_top), encoding="utf-8")
 
     print(f"板块一 官方·图  {len(official):>3} 条 -> {out/'card.html'}，取前 {args.top}")
     for i, it in enumerate(official[: args.top], 1):
