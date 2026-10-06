@@ -1254,6 +1254,18 @@ def _ai_ok(item):
     return len(paras) >= 3 and total >= 150
 
 
+def _title_bare(title):
+    """标题只把钩子例句抄了一遍（「不懂就问：这到底合不合规？」），等于没写事。
+
+    实测 glm-4.5-flash 就爱这么交差：提示词里给它一条起手式例句，它原样搬来当标题。
+    这种标题发到 X 上读者什么也看不到，宁可当这条没写成，让下一个模型重试。
+    """
+    t = (title or "").strip().rstrip("。？！?!")
+    if len(t) < 12:
+        return True
+    return any(t in eg.rstrip("。？！") for _, eg in _WRITER_HOOKS)
+
+
 def _ai_parse(text):
     """模型爱加说明、```json 围栏，还可能写到一半被输出上限截断。
 
@@ -1363,7 +1375,8 @@ def ai_write_stories(items, seeds, top, now=None, bang=None):
             user += ["", "已经发过的选题（换个角度写，别重复）：" + "、".join(x["title"] for x in wrote)]
         user += [
             "", f"把上面这 {len(batch)} 条母题各写成一条独立帖子，一条一个，顺序对应。",
-            "- title 是一到两句的开场钩子，直接把事端出来。",
+            "- title 是「钩子 + 这件事」：把下面分到的起手式接上具体事端，一到两句。",
+            "  只抄起手式本身（例如只写「不懂就问：这到底合不合规？」）不算一条帖子。",
         ]
         if fp.get("n"):
             user += _bangdan_prompt(fp)
@@ -1384,7 +1397,7 @@ def ai_write_stories(items, seeds, top, now=None, bang=None):
         got = []
         for cand in models:                     # 第一个有回话的模型认下来，之后不再换
             raw = _ai_call(key, base, cand, _AI_SYSTEM, "\n".join(user))
-            got = [x for x in _ai_parse(raw) if _ai_ok(x)]
+            got = [x for x in _ai_parse(raw) if _ai_ok(x) and not _title_bare(x["title"])]
             if got:
                 model, models = cand, [cand]     # 认下这个模型，后面的批次不再换
                 break
@@ -1649,6 +1662,11 @@ def main():
         assert "\n\n第二段。" in apool, "AI 故事的分段被 _paragraphs 重排了"
         assert not any(h in apool for h in _HOOK_SELF), "AI 故事不该再套模板钩子"
         assert "网友：" not in apool
+        # 标题只抄例句的，等于什么都没写，得拦掉（弱模型爱这么交差）
+        assert _title_bare("不懂就问：这到底合不合规？"), "抄例句的标题没被拦"
+        assert _title_bare("卧槽，真的假的？"), "短得没信息的标题没被拦"
+        assert not _title_bare("不懂就问：楼下装修三年没人管，物业说管不了"), \
+            "钩子接上事由的正常标题被误杀了"
         # 一批挂掉不该把后面的批全废掉：限流是随机的，接着试还能捞回来
         gg = globals()
         calls = {"n": 0}
@@ -1658,8 +1676,8 @@ def main():
             calls["n"] += 1
             if calls["n"] <= dead:
                 return ""
-            return json.dumps([{"title": "测试钩子",
-                               "paras": ["甲" * 120, "乙" * 60, "丙" * 60]}],
+            return json.dumps([{"title": "不懂就问：楼下装修三年没人管",
+                                "paras": ["甲" * 120, "乙" * 60, "丙" * 60]}],
                               ensure_ascii=False)
 
         keep_call, keep_cfg = gg["_ai_call"], gg["_ai_config"]
