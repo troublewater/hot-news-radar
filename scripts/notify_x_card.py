@@ -18,6 +18,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 import urllib.error
@@ -77,10 +78,22 @@ def should_send(state_path, now, force=False):
     return True, slot, ""
 
 
-def build_content(copy_text, image_url, site_url, now=None):
+def bangdan_brief(path="docs/x/bangdan.md"):
+    """从爆款风向备忘里抠出那一行「风向：…」附在推送里。读不到就不加，不开天窗。"""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+    m = re.search(r"^风向：(.*)$", text, re.M)
+    return m.group(1).strip()[:120] if m else ""
+
+
+def build_content(copy_text, image_url, site_url, now=None, brief=""):
     now = now or datetime.now(CN_TZ)
     # 首行固定含「热点」：飞书自定义机器人的关键词校验可用 批次,热点 两个词兜住
     parts = [f"📮 今日热点 · X 素材（{now.strftime('%m/%d')}）", ""]
+    if brief:
+        parts += [f"🧭 今日爆款风向：{brief}", ""]
     if image_url:
         # 不能用 ![](url)：飞书把 markdown 图片当 img_key 校验，只认自家上传的图，
         # 传外链会被拒收（11246 / invalid image keys）。自定义机器人拿不到 img_key，
@@ -119,6 +132,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--copy", default="docs/x/copy.txt", help="文案文件")
     ap.add_argument("--site", default="", help="站点地址，用于图片链接和页脚链接")
+    ap.add_argument("--brief", default="docs/x/bangdan.md",
+                    help="爆款风向备忘，抽出行首的「风向：」附在推送里")
     ap.add_argument("--image-url", default="", help="卡片 PNG 的完整地址，留空则不发图")
     ap.add_argument("--force", action="store_true", help="忽略时段和当天去重，强制发送")
     ap.add_argument("--state", default=DEFAULT_STATE, help="推送记录文件，防止同一时段重复推送")
@@ -132,6 +147,16 @@ def main():
         payload = build_payload(content)
         assert payload["msg_type"] == "interactive", "消息类型不对"
         assert payload["card"]["schema"] == "2.0", "卡片版本不对"
+        withbrief = build_content("文案", "", "", brief="X 上今天跑得动的是 场景代入 这类开头。")
+        assert "爆款风向：" in withbrief, "爆款风向行没加进去"
+        assert "爆款风向" not in content, "没有风向时不该出现空的风向行"
+        # 风向是可选增强：备忘丢了、或今天没抓到爆款源，都不能影响推送
+        assert bangdan_brief("没有这个文件") == ""
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "bangdan.md")
+            Path(p).write_text("# 爆款风向\n\n来源：x\n\n风向：暴论反问最吃香。\n",
+                               encoding="utf-8")
+            assert bangdan_brief(p) == "暴论反问最吃香。", bangdan_brief(p)
         el = payload["card"]["body"]["elements"][0]
         assert el["tag"] == "markdown" and "热点" in el["content"], "关键词兜底字样丢了"
         assert "[🖼 点此查看卡片图](https://example.com/x/card.png)" in el["content"], "图片链接没生成"
@@ -180,7 +205,10 @@ def main():
     # 版本号精确到分钟：同一天几次推送若共用同一个 URL，飞书会拿缓存，看到的是旧卡片图
     image_url = args.image_url or (f"{site}/x/card.png?v={now:%m%d%H%M}" if site else "")
 
-    payload = build_payload(build_content(copy_text, image_url, site, now))
+    brief = bangdan_brief(args.brief)
+    payload = build_payload(build_content(copy_text, image_url, site, now, brief))
+    if not brief:
+        print("  （没读到爆款风向，这轮不附风向行）")
     try:
         ok, body = post(webhook, payload)
     except urllib.error.HTTPError as e:
