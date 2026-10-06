@@ -1340,7 +1340,7 @@ def ai_write_stories(items, seeds, top, now=None, bang=None):
     models = [model] + [m for m in _AI_MODEL_FALLBACKS if m != model]
     # 抓到的那批素材当「事实毛坯」递过去：模型改编时手上有细节，不至于全靠编
     seeds = [{"标题": s["title"], "正文": s["desc"][:400]} for s in (seeds or [])[:top]]
-    wrote = []
+    wrote, fails = [], 0
     for start in range(0, top, _AI_BATCH):
         want = min(_AI_BATCH, top - len(wrote))
         if want <= 0:
@@ -1389,9 +1389,15 @@ def ai_write_stories(items, seeds, top, now=None, bang=None):
                 model, models = cand, [cand]     # 认下这个模型，后面的批次不再换
                 break
         if not got:
-            print("  ⚠️ 试过的模型都没写出合格内容（要求：至少 3 段、150 字）")
+            # 一批挂掉不该把后面的批全废掉：限流是随机的，接着试还能捞回来。
+            # 但连挂两批就认输，别把配额烧光（实测 glm-4.5-flash 经常只出 1/4）。
+            fails += 1
+            print(f"  ⚠️ 第 {start // _AI_BATCH + 1} 批没写出合格内容（要求：至少 3 段、150 字）")
             print("     → 多半是模型太弱或被限流。可改 config/config.yaml 的 ai.x_writer_model")
-            break
+            if fails >= 2:
+                break
+            continue
+        fails = 0
         wrote += got
         print(f"  AI 改写：{len(batch)} 条话题 -> 成稿 {len(got)} 条")
     return [{"title": g["title"], "desc": "\n\n".join(g["paras"]), "src": "AI 改编",
@@ -1643,6 +1649,28 @@ def main():
         assert "\n\n第二段。" in apool, "AI 故事的分段被 _paragraphs 重排了"
         assert not any(h in apool for h in _HOOK_SELF), "AI 故事不该再套模板钩子"
         assert "网友：" not in apool
+        # 一批挂掉不该把后面的批全废掉：限流是随机的，接着试还能捞回来
+        gg = globals()
+        calls = {"n": 0}
+        dead = len(_AI_MODEL_FALLBACKS) + 1     # 第一批会挨个试完所有模型
+
+        def flaky(key, base, model, system, user):
+            calls["n"] += 1
+            if calls["n"] <= dead:
+                return ""
+            return json.dumps([{"title": "测试钩子",
+                               "paras": ["甲" * 120, "乙" * 60, "丙" * 60]}],
+                              ensure_ascii=False)
+
+        keep_call, keep_cfg = gg["_ai_call"], gg["_ai_config"]
+        # 夹具里全是新闻标题（一个母题都不命中），拼一条有母题的进去才能跑到改写
+        hot8 = items + [{"title": "女子相亲被要20万彩礼", "platforms": ["微博"], "rank": 1}]
+        gg["_ai_call"], gg["_ai_config"] = flaky, lambda: ("k", "https://x", "m")
+        try:
+            salvaged = ai_write_stories(hot8, [], 8)
+        finally:
+            gg["_ai_call"], gg["_ai_config"] = keep_call, keep_cfg
+        assert len(salvaged) == 1 and salvaged[0]["ai"], salvaged
         # 钩子话题：只有标题里带钩子的才算，且按共振数排热度
         hot = [{"title": "男子讨薪偷老板6千元被抓", "platforms": ["微博", "知乎"], "rank": 1},
                {"title": "某公司发布新款服务器", "platforms": ["IT之家"], "rank": 1},
