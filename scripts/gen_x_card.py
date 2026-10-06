@@ -859,6 +859,15 @@ _AI_BASE = "https://open.bigmodel.cn/api/paas/v4"
 # 按强弱依次试，哪个能回话就用哪个（配额/改名都不至于整批作废）。
 _AI_MODEL_FALLBACKS = ["glm-4.7-flash", "glm-4.5-flash", "glm-4-flash"]
 _AI_MODEL = _AI_MODEL_FALLBACKS[0]
+
+
+def _fallbacks(base):
+    """降级链跟着端点走：拿智谱的模型名去问 DeepSeek，只会白烧一分钟的请求。"""
+    if "deepseek" in base:
+        return ["deepseek-chat", "deepseek-reasoner"]
+    if "bigmodel" in base:
+        return _AI_MODEL_FALLBACKS
+    return []                     # 自建/中转站：模型名无从猜，先信配置里那一个
 _AI_BATCH = 4                    # 一次 4 条：一次要太多会撞输出上限，JSON 被截断就整批作废
 _AI_TIMEOUT = 180
 _FREQ_PATH = Path(__file__).resolve().parent.parent / "config" / "frequency_words.txt"
@@ -923,7 +932,8 @@ def _yaml_ai():
             encoding="utf-8", errors="ignore")
     except OSError:
         return cfg
-    for key in ("api_key", "model", "api_base", "x_writer_model", "x_writer_api_base"):
+    for key in ("api_key", "model", "api_base", "x_writer_model", "x_writer_api_base",
+                "x_writer_api_key"):
         m = re.search(r"^\s*" + key + r":\s*[\"']?([^\"'\s#]+)", text, re.M)
         if m:
             cfg[key] = m.group(1).strip()
@@ -931,14 +941,29 @@ def _yaml_ai():
 
 
 def _ai_config():
-    """环境变量优先，其次 config.yaml，最后退回智谱默认。"""
+    """环境变量优先，其次 config.yaml，最后退回智谱默认。
+
+    板块二可以单独接一家供应商（ai.x_writer_api_key + x_writer_api_base）：换 DeepSeek
+    不用动 AI_API_KEY，爬虫自己的分析/翻译照旧，两边互不影响。
+    """
     y = _yaml_ai()
-    key = os.environ.get("AI_API_KEY", "").strip() or y.get("api_key", "")
-    base = (os.environ.get("AI_API_BASE", "").strip()
-            or y.get("x_writer_api_base", "") or y.get("api_base", "") or _AI_BASE)
-    # 写故事可以单独指定模型（ai.x_writer_model）：爬虫的 AI 分析用什么跟这里无关
-    model = (os.environ.get("AI_MODEL", "").strip()
-             or y.get("x_writer_model", "") or y.get("model", "") or _AI_MODEL)
+    wkey = os.environ.get("X_WRITER_API_KEY", "").strip() or y.get("x_writer_api_key", "")
+    wbase = y.get("x_writer_api_base", "")
+    if wkey:
+        key = wkey
+        base = os.environ.get("X_WRITER_API_BASE", "").strip() or wbase or _AI_BASE
+        # 专属 key 在场时以 x_writer_model 为准（AI_MODEL 是爬虫那边的设置）
+        model = y.get("x_writer_model", "") or _AI_MODEL
+    else:
+        # 端点配了别家、专属 key 还没填：拿旧 key 去撞就是 401，整批文案全空。
+        # 所以这里宁可先用原供应商，只提醒一句。
+        if wbase:
+            print("  ⚠️ 配了 ai.x_writer_api_base 但没配 ai.x_writer_api_key，这轮仍用原供应商")
+        key = os.environ.get("AI_API_KEY", "").strip() or y.get("api_key", "")
+        base = os.environ.get("AI_API_BASE", "").strip() or y.get("api_base", "") or _AI_BASE
+        # 写故事可以单独指定模型（ai.x_writer_model）：爬虫的 AI 分析用什么跟这里无关
+        model = (os.environ.get("AI_MODEL", "").strip()
+                 or y.get("x_writer_model", "") or y.get("model", "") or _AI_MODEL)
     if model.startswith("openai/"):              # LiteLLM 前缀，直连时要去掉
         model = model.split("/", 1)[1]
     return key, base.rstrip("/"), model
@@ -1313,12 +1338,13 @@ _AI_PROBE_MODELS = ["glm-4.7-flash", "glm-4.5-flash", "glm-4-flash", "glm-4.6-fl
 
 def ai_probe():
     """拿当前 key 挨个问一遍，看哪些模型真能用。"""
-    key, base, _ = _ai_config()
+    key, base, model = _ai_config()
     if not key:
-        print("没配 AI_API_KEY / ai.api_key，没法探测")
+        print("没配 API Key（AI_API_KEY / ai.x_writer_api_key），没法探测")
         return
     print(f"接口：{base}")
-    for model in _AI_PROBE_MODELS:
+    # 先试真正会用到的那条降级链，再捎带试几个常见的名字
+    for model in dict.fromkeys([model] + _fallbacks(base) + _AI_PROBE_MODELS):
         body = json.dumps({"model": model, "max_tokens": 16,
                            "messages": [{"role": "user", "content": "回一个字：好"}]}).encode()
         req = urllib.request.Request(
@@ -1349,7 +1375,7 @@ def ai_write_stories(items, seeds, top, now=None, bang=None):
     if not topics:
         return []
     fp = bangdan_fingerprint(bang) if bang else {}
-    models = [model] + [m for m in _AI_MODEL_FALLBACKS if m != model]
+    models = [model] + [m for m in _fallbacks(base) if m != model]
     # 抓到的那批素材当「事实毛坯」递过去：模型改编时手上有细节，不至于全靠编
     seeds = [{"标题": s["title"], "正文": s["desc"][:400]} for s in (seeds or [])[:top]]
     wrote, fails = [], 0
@@ -1683,7 +1709,9 @@ def main():
         keep_call, keep_cfg = gg["_ai_call"], gg["_ai_config"]
         # 夹具里全是新闻标题（一个母题都不命中），拼一条有母题的进去才能跑到改写
         hot8 = items + [{"title": "女子相亲被要20万彩礼", "platforms": ["微博"], "rank": 1}]
-        gg["_ai_call"], gg["_ai_config"] = flaky, lambda: ("k", "https://x", "m")
+        # base 得是智谱那家，降级链才有 3 个模型（_fallbacks 按端点给链）
+        gg["_ai_call"], gg["_ai_config"] = flaky, lambda: (
+            "k", "https://open.bigmodel.cn/api/paas/v4", "m")
         try:
             salvaged = ai_write_stories(hot8, [], 8)
         finally:
@@ -1701,6 +1729,20 @@ def main():
         _tw = _load_topic_words()
         assert "彩礼" in _tw.get("彩礼婚恋", []), _tw.get("彩礼婚恋")
         assert _ai_config()[1].startswith("http"), "AI base 没配出默认值"
+        # 换供应商只认「专属 key」：端点改了、key 没填时不能拿旧 key 去撞 401
+        os.environ.pop("X_WRITER_API_KEY", None)
+        no_wkey = _ai_config()
+        if _yaml_ai().get("x_writer_api_base"):       # 配置里确实指了别家才谈得上回退
+            assert "deepseek" not in no_wkey[1], f"没专属 key 却把端点切走了：{no_wkey[1]}"
+        os.environ["X_WRITER_API_KEY"] = "sk-test-only"
+        try:
+            w = _ai_config()
+        finally:
+            os.environ.pop("X_WRITER_API_KEY", None)
+        assert w[0] == "sk-test-only" and w[1].startswith("http"), w
+        assert _fallbacks("https://api.deepseek.com")[0] == "deepseek-chat"
+        assert _fallbacks("https://open.bigmodel.cn/api/paas/v4")[0] == "glm-4.7-flash"
+        assert _fallbacks("https://my-relay.example.com/v1") == []
         assert _ARTICLE_CHARS >= 500, "正文取太短就只剩引子了"
         assert _cut_sentences("第一句。第二句。第三句。", chars=10) == "第一句。第二句。", \
             _cut_sentences("第一句。第二句。第三句。", chars=10)
