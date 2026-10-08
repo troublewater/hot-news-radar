@@ -958,13 +958,18 @@ def _ai_config():
     else:
         # 端点配了别家、专属 key 还没填：拿旧 key 去撞就是 401，整批文案全空。
         # 所以这里宁可先用原供应商，只提醒一句。
-        if wbase:
-            print("  ⚠️ 配了 ai.x_writer_api_base 但没配 ai.x_writer_api_key，这轮仍用原供应商")
         key = os.environ.get("AI_API_KEY", "").strip() or y.get("api_key", "")
         base = os.environ.get("AI_API_BASE", "").strip() or y.get("api_base", "") or _AI_BASE
-        # 写故事可以单独指定模型（ai.x_writer_model）：爬虫的 AI 分析用什么跟这里无关
-        model = (os.environ.get("AI_MODEL", "").strip()
-                 or y.get("x_writer_model", "") or y.get("model", "") or _AI_MODEL)
+        if wbase:
+            # 配了别家端点却没给 key：这时候 x_writer_model 是那家的模型名，
+            # 拿它去撞原供应商只会 404，所以连模型一起退回原供应商。
+            print("  ⚠️ 配了 ai.x_writer_api_base 但没配 ai.x_writer_api_key，这轮仍用原供应商")
+            model = (os.environ.get("AI_MODEL", "").strip()
+                     or y.get("model", "") or _AI_MODEL)
+        else:
+            # 写故事可以单独指定模型（ai.x_writer_model）：爬虫的 AI 分析用什么跟这里无关
+            model = (os.environ.get("AI_MODEL", "").strip()
+                     or y.get("x_writer_model", "") or y.get("model", "") or _AI_MODEL)
     if model.startswith("openai/"):              # LiteLLM 前缀，直连时要去掉
         model = model.split("/", 1)[1]
     return key, base.rstrip("/"), model
@@ -1145,6 +1150,55 @@ def fetch_bangdan(timeout=45):
     return rows
 
 
+# SoPilot 爆帖榜：公开页，不用登录。只取文案样本——曝光数在页面另一处、而且
+# 标题行已经给了足够的风格信号，这里不折腾配对，免得解析一改版就碎。
+_SOPILOT = "https://sopilot.net/zh/rank/tweets?range={range}"
+_SOPILOT_ANCHOR = re.compile(
+    r'<a[^>]+href="(https://x[.]com/[^"?]+?/status/\d+)"[^>]*>(.*?)</a>', re.S)
+
+
+def fetch_sopilot(ranges=("24h", "yesterday"), timeout=45):
+    """抓 SoPilot 爆帖榜，返回与 fetch_bangdan 同形状的行（曝光一律 0）。
+
+    链接文本就是推文文案（图片链接内部只有 <img>、没有文本，所以这样能区分），
+    带 ? 的是互动链接（?sid= / ?quoto=），不算文案。跟 xbangdan 合并后再量一次
+    钩子/风格指纹：样本翻倍，结论更稳。
+    """
+    rows, seen = [], set()
+    for rng in ranges:
+        try:
+            req = urllib.request.Request(_SOPILOT.format(range=rng), headers=_HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                page = resp.read().decode("utf-8", "ignore")
+        except Exception as exc:        # noqa: BLE001 - 少一个源不该拖垮流水线
+            print(f"  ⚠️ SoPilot {rng} 没抓到（{type(exc).__name__}: {exc}）")
+            continue
+        for url, inner in _SOPILOT_ANCHOR.findall(page):
+            text = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", inner))).strip()
+            if len(text) < 12 or text[:6] in seen:
+                continue
+            seen.add(text[:6])
+            rows.append({"handle": url.split("/")[3], "name": "", "text": text,
+                         "v": 0, "r": 0, "l": 0, "age": rng, "cat": "none"})
+    if rows:
+        print(f"  ✅ SoPilot 去重后 {len(rows)} 条文案样本")
+    return rows
+
+
+def fetch_hot_sources(timeout=45):
+    """两个爆款源交错合并。交错很关键：fingerprint 只采样前 60 条，
+    直接拼接的话后一个源一条都轮不上。"""
+    bd = fetch_bangdan(timeout=timeout)
+    sp = fetch_sopilot(timeout=timeout)
+    out = []
+    for i in range(max(len(bd), len(sp))):
+        if i < len(bd):
+            out.append(bd[i])
+        if i < len(sp):
+            out.append(sp[i])
+    return out
+
+
 def _bd_named(common, n, skip="无钩子"):
     """钩子榜里剔掉「无钩子」再取前 n 个——量不出来就别写进风向。"""
     return [h for h, _ in common if h != skip][:n]
@@ -1169,7 +1223,7 @@ def bangdan_fingerprint(rows, sample=60):
     return {"n": len(rows), "hooks": hooks.most_common(), "styles": styles.most_common(),
             "cats": cats.most_common(), "len_mid": lens[len(lens) // 2],
             "openers": [r["text"][:40].replace("\n", " ") for r in rows[:6]],
-            "tops": rows[:5]}
+            "tops": [r for r in rows if r["v"] > 0][:5]}   # SoPilot 那批没曝光数，不进对标榜
 
 
 # 高频词统计要拦掉的常见字，不拦的话三字窗全是「你可以」「这就是」这种
@@ -1208,7 +1262,7 @@ def render_bangdan(rows, now=None):
     now = now or datetime.now()
     fp = bangdan_fingerprint(rows)
     out = [f"# 爆款风向 · {now:%Y-%m-%d}", "",
-           f"来源：xbangdan.com（X 中文区 24 小时曝光榜 + 增速榜，采样 {fp['n']} 条）", ""]
+           f"来源：xbangdan.com + sopilot.net（X 中文区 24 小时曝光/增速榜，采样 {fp['n']} 条）", ""]
     if not fp["n"]:
         return "\n".join(out + ["⚠️ 今天没抓到爆款源，这一轮没参考它（不影响出稿）。"]) + "\n"
     top_hooks = "、".join(_bd_named(fp["hooks"], 4)) or "没量出明显套路"
@@ -1974,7 +2028,7 @@ def main():
     # 抓不到才退回榜单标题——那样只有标题，信息量和卡片图没区别。
     stories = [] if args.no_stories else collect_stories(args.story_top)
     # 爆款源：X 中文区的实时风向。抓不到就当没有，不影响出稿。
-    bang = [] if args.no_bangdan else fetch_bangdan()
+    bang = [] if args.no_bangdan else fetch_hot_sources()
     fp = bangdan_fingerprint(bang)
     terms = _bd_terms(bang)
     (out / "bangdan.md").write_text(render_bangdan(bang), encoding="utf-8")
