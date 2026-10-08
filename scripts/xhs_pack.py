@@ -253,10 +253,19 @@ def xhs_write(picked, fp, now=None):
     # 分小批写：一次要 10 条长正文容易撞输出上限，也被限流一枪打死整批。
     for k in range(0, len(picked), _XHS_BATCH):
         chunk = picked[k:k + _XHS_BATCH]
-        last = gx._ai_call(key, base, model, _XHS_SYSTEM, _xhs_prompt(chunk, fp))
-        for x in _xhs_parse(last):
-            x["i"] += k                      # 分批后编号要从整批的序号起算
-            got.append(x)
+        prompt, part = _xhs_prompt(chunk, fp), []
+        # 模型十次里有几次只交一半（实测 5 条只回 1 条），再要一次基本就补齐了
+        for _attempt in (1, 2):
+            last = gx._ai_call(key, base, model, _XHS_SYSTEM, prompt)
+            have = {x["i"] for x in part}
+            for x in _xhs_parse(last):
+                x["i"] += k                  # 分批后编号要从整批的序号起算
+                if x["i"] not in have:
+                    part.append(x)
+            if len(part) >= len(chunk):
+                break
+        print(f"    第 {k // _XHS_BATCH + 1} 批：{len(chunk)} 条 -> 成稿 {len(part)} 条")
+        got += part
     print(f"  AI 二创：{len(picked)} 条 -> 成稿 {len(got)} 条")
     if not got:
         # 打一小段原文，省得下次还得翻整轮日志才知道模型交了什么
