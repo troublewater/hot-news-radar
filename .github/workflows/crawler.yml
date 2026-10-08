@@ -253,37 +253,20 @@ jobs:
           test -s docs/x/card.png || { echo "❌ 卡片截图失败：Chrome 说成功但没写出 PNG"; exit 1; }
           ls -lh docs/x/
 
-      # ── 小红书图文包：按当日爆款源风向重筛 + 二创 + 竖版封面 ─────────
-      # 产物 docs/xhs/ 跟着下面的 Sync 步骤上线。页面里引的是 cover/N.png，
-      # 所以截图必须在这一步完成（Sync 之前）。
-      # 注意：小红书没有开放的发帖接口，这里只做「图文包 + 推飞书」，发帖手动。
-      - name: Build Xiaohongshu pack
+      # ── 今日热点精选（原名「小红书图文包」）─────────────────────────
+      # 产物 docs/xhs/ 跟着下面的 Sync 步骤上线，链接推飞书。
+      # 配图只用原贴的 og:image：热榜链多是搜索页/列表页，抓不到就不配图，
+      # 不生成替代图（所以这里也不再跑 Chrome 截图）。
+      - name: Build daily picks pack
         if: success()
         continue-on-error: true
         env:
           SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
           set -e
-          mkdir -p docs/xhs/cover
           python3 scripts/xhs_pack.py --source docs/reports/latest/current.html \
             --out-dir docs/xhs --top 10 --site "$SITE_URL"
-          if ! fc-list :lang=zh 2>/dev/null | grep -q .; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq fonts-noto-cjk
-          fi
-          CHROME=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)
-          if [ -z "$CHROME" ]; then echo "❌ 找不到 Chrome，无法截图"; exit 1; fi
-          # 1080x1440 就是小红书竖版 3:4 的原生尺寸，不再放大，省仓库体积
-          for f in docs/xhs/cover/*.html; do
-            n=$(basename "$f" .html)
-            "$CHROME" --headless=new --disable-gpu --no-sandbox --disable-dev-shm-usage \
-              --hide-scrollbars \
-              --user-data-dir="$RUNNER_TEMP/chrome-xhs-$n" \
-              --window-size=1080,1440 --virtual-time-budget=5000 \
-              --screenshot="$PWD/docs/xhs/cover/$n.png" "file://$PWD/$f"
-            test -s "docs/xhs/cover/$n.png" || { echo "❌ 封面 $n 截图失败"; exit 1; }
-          done
-          ls -lh docs/xhs/ docs/xhs/cover/
+          ls -lh docs/xhs/
 
       # ── 侦察：runner（美国）能不能直连中文站点 ───────────────
       # 下一步要从微信公众号 / 虎扑拿段子正文，先确认网络路径通不通。
