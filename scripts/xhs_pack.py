@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # coding=utf-8
-"""小红书图文包：按今日爆款风向从热榜里挑 10 条最像爆款的新闻，
-照爆款源的风格二创成小红书文案，每条配一张封面图，打包成可直接发的页面。
+"""今日热点精选：按当天爆款风向从热榜里挑 10 条最像爆款的新闻，
+照爆款源的风格二创成可直接发的文案，连原贴链接/配图打包成一个页面推飞书。
 
 筛选规则不写死名单，而是**每天现算**：素材 = 当天两个爆款源（xbangdan + SoPilot）
 量出来的风向（跑得动的开头 / 风格 / 高频题材词）+ 跨天累计的稳定项（见
 hooksupdate.md 第 4 节的自动风向区）。
 
+配图只认原贴的 og:image，抓不到就不配图（热榜链多是搜索页/列表页，本来就没图），
+不生成替代图。
+
 用法：
     python3 scripts/xhs_pack.py                # 全流程（要 AI key）
-    python3 scripts/xhs_pack.py --no-ai        # 只筛选 + 出封面，不调模型
+    python3 scripts/xhs_pack.py --no-ai        # 只筛选 + 打包，不调模型
     python3 scripts/xhs_pack.py --top 10 --explain   # 打印每条的得分理由
     python3 scripts/xhs_pack.py --selftest
 """
@@ -23,6 +26,7 @@ import json
 import os
 import re
 import sys
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -31,12 +35,12 @@ import gen_x_card as gx          # noqa: E402  复用解析 / 爆款源 / AI / �
 
 # 爆款风格 -> 标题里长什么样的更贴。风向说今天哪几类跑得动，就照这几类加分。
 _STYLE_HINT = [
-    ("奇观猎奇", r"奇|怪|罕见|首个|第一|最|破|极限|离谱|神|魔幻|惊"),
-    ("暴论观点", r"争议|吵|怼|怒|骂|回应|反驳|质疑|不满|抵制|炮轰"),
-    ("家庭日常", r"婚|彩礼|婆|妈|爸|孩子|夫妻|亲|份子钱|房|家"),
-    ("民间共鸣", r"网友|热议|吐槽|投诉|维权|曝光|翻车|坑|割韭菜"),
-    ("都市夜话", r"男子|女子|大爷|大妈|小伙|业主|邻居|室友|同事|顾客"),
-    ("快讯播报", r"通报|回应|警方|官方|声明|辟谣"),
+    ("奇观猎奇", r"奇观|罕见|首次|首例|第一次|离谱|魔幻|奇葩|惊呆|破纪录|极限|第一人"),
+    ("暴论观点", r"争议|吵|怼|怒|骂|反驳|质疑|不满|抵制|炮轰|打脸|开撕"),
+    ("家庭日常", r"彩礼|婚|婆媳|丈母娘|夫妻|离婚|份子钱|带娃|爸妈"),
+    ("民间共鸣", r"网友|热议|吐槽|投诉|维权|曝光|翻车|割韭菜|踩雷"),
+    ("都市夜话", r"男子|女子|大爷|大妈|小伙|业主|邻居|室友|同事|顾客|外卖|司机"),
+    # 「快讯播报」故意不列：通报体是照实写的那种，正是二创写不出东西的题
 ]
 # 有冲突才有故事性：平淡的正经消息在小红书没人点
 _CONFLICT = re.compile(
@@ -54,15 +58,19 @@ def score_news(items, fp, keywords):
         t = it["title"]
         if gx._AD_HOT.search(t):          # 广告 / 开售稿直接踢，别再让它混进 TOP1
             continue
-        why, sc = [], 0.0
-        hit = [w for w in keywords if w in t]
+        why, sc, src = [], 0.0, False
+        # 长词更具体：三字以上才给满分，两字（中国/觉得这种）减半，免得口水词顶掉真题材
+        hit = sorted([w for w in keywords if w in t], key=len, reverse=True)
         if hit:
-            sc += 4 * min(len(hit), 2)
+            sc += sum(4 if len(w) >= 3 else 2 for w in hit[:2])
             why.append("题材词 " + "/".join(hit[:3]))
+            # 两字词（中国/美国）太泛，光靠它不算「对上爆款源」，得有个三字以上的实词
+            src = any(len(w) >= 3 for w in hit)
         for name, pat in _STYLE_HINT:
             if name in styles and re.search(pat, t):
                 sc += 3
                 why.append(f"贴「{name}」")
+                src = True
         if _CONFLICT.search(t):
             sc += 2
             why.append("有冲突")
@@ -81,30 +89,48 @@ def score_news(items, fp, keywords):
         if gx._NEWSY_TITLE.search(t):
             sc -= 4
             why.append("新闻腔（只能照实写）")
-        out.append({"score": round(sc, 1), "why": why, "item": it})
+        # src=False 的条目「热」但不贴爆款源，只配当候补
+        out.append({"score": round(sc, 1), "why": why, "item": it, "src": src})
     out.sort(key=lambda x: -x["score"])
     return out
 
 
 def pick_top(scored, top, keywords):
-    """同题材 / 同高频词别连占位：先每组最多 2 条，不够再放宽到 3、4。"""
+    """同题材 / 同高频词别连占位。
+
+    题材词命中说明「是同一个事件」（尊界那三条都含「尊界」），这类位子固定最多 2 个，
+    不跟着后面的放宽走；题材分组只是粗分类，不够 10 条时可以放宽到 3 个。
+    """
     sigs = [{w for w in keywords if w in r["item"]["title"]} for r in scored]
     picked, used, taken = [], {}, set()
-    for cap in (2, 3, 4):
+    for cap in (2, 3):
         for i, row in enumerate(scored):
-            if i in taken:
+            if i in taken or not row.get("src"):
+                continue          # 没跟爆款源对上的，宁可空着也不凑数
+            groups = {g for g in (next((w for w in gx._THEME_WORDS if w in row["item"]["title"]), None),
+                                  row["item"]["group"] or "其他") if g}
+            kws = {"kw:" + w for w in sigs[i]}
+            # 命中了题材词就按题材词算：同一个词始终是同一个事件，不放宽
+            room = (any(used.get(k, 0) < 2 for k in kws) if kws
+                    else any(used.get(k, 0) < cap for k in groups))
+            if not room:
                 continue
-            keys = {t for t in (next((w for w in gx._THEME_WORDS if w in row["item"]["title"]), None),
-                                row["item"]["group"] or "其他") if t}
-            keys |= {"kw:" + w for w in sigs[i]}
-            if all(used.get(k, 0) >= cap for k in keys):
-                continue
-            for k in keys:
+            for k in groups | kws:
                 used[k] = used.get(k, 0) + 1
             taken.add(i)
             picked.append(row)
             if len(picked) >= top:
                 return picked
+    # 兜底：够格的不到 10 条时按分数补位，但把「这条没对上爆款源」写进理由，
+    # 免得跟真匹配的混在一起，事后分不清哪些是硬凑的
+    for i, row in enumerate(scored):
+        if i in taken:
+            continue
+        row["why"].append("补位（没对上爆款源）")
+        taken.add(i)
+        picked.append(row)
+        if len(picked) >= top:
+            break
     return picked
 
 
@@ -213,31 +239,28 @@ def xhs_write(picked, fp, now=None):
     return got
 
 
-# ── 封面：小红书是竖版 3:4。每条一张，图文一一对应 ─────────────────────
-def cover_html(idx, title, kicker, site):
-    """每条新闻一张封面页。真正的「新闻原图」抓不到（热榜链接大多是搜索页），
-    所以封面按标题生成——图文对应靠的是「这条文案配这张封面」。"""
-    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<style>
-  html,body{{margin:0;padding:0}}
-  .c{{width:1080px;height:1440px;box-sizing:border-box;padding:96px 84px;display:flex;
-     flex-direction:column;justify-content:space-between;
-     font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif;
-     background:linear-gradient(160deg,#1b1b22 0%,#2a2233 55%,#3a2430 100%);color:#fff}}
-  .top{{display:flex;align-items:center;gap:18px;font-size:30px;color:#ffd479;font-weight:700}}
-  .badge{{background:#ff2e4d;color:#fff;border-radius:999px;padding:8px 26px;font-size:28px}}
-  h1{{font-size:96px;line-height:1.28;margin:0;font-weight:900;letter-spacing:1px;
-     word-break:break-word}}
-  .hl{{color:#ffd479}}
-  .foot{{display:flex;justify-content:space-between;align-items:flex-end;
-        font-size:28px;color:#c8c8d0;border-top:2px solid rgba(255,255,255,.14);padding-top:26px}}
-  .n{{font-size:34px;color:#ff6b81;font-weight:800}}
-</style></head><body>
-<div class="c">
-  <div class="top"><span class="badge">今日热议</span><span>{kicker}</span></div>
-  <h1>{title}</h1>
-  <div class="foot"><span>{site}</span><span class="n">0{idx}</span></div>
-</div></body></html>"""
+# ── 原贴配图：拿不到就不配图 ──────────────────────────────────────────
+# 热榜链一半是搜索页/列表页（s.weibo.com、bbs.hupu.com、tieba 的 hottopic...），
+# 实测 12 条里 0 条带 og:image。所以别在这儿生成替代图：抓到就用，抓不到就空着。
+_OG_TAG = re.compile(r"<meta\b[^>]*>", re.I)
+_OG_KEYS = ("og:image", "twitter:image")
+
+
+def fetch_og_image(url, timeout=8):
+    """从原贴页面取 og:image。慢、失败、本来就没有，都返回空串（不重试）。"""
+    try:
+        req = urllib.request.Request(url, headers=dict(gx._HEADERS))
+        with gx._OPENER.open(req, timeout=timeout) as resp:
+            page = resp.read(200_000).decode("utf-8", "ignore")
+    except Exception:            # noqa: BLE001 - 抓不到很正常，不该拖慢整轮
+        return ""
+    for tag in _OG_TAG.findall(page):
+        if not any(k in tag for k in _OG_KEYS):
+            continue
+        m = re.search(r'content=["\']([^"\']+)', tag, re.I)
+        if m and m.group(1).startswith("http"):
+            return m.group(1)
+    return ""
 
 
 def render_pack(picked, wrote, site, handle="", now=None):
@@ -247,13 +270,18 @@ def render_pack(picked, wrote, site, handle="", now=None):
     cards = []
     for n, row in enumerate(picked, 1):
         it = row["item"]
+        orig = it.get("orig") or ""
+        # 没图就不留空列：10 条里通常一条图都没有，那个 300px 的空档太显眼
+        pic = (f'<div class="cov"><img src="{html.escape(orig)}" alt="原贴配图" loading="lazy"></div>'
+               if orig else "")
+        nopic = "" if orig else '<div class="why">原贴没给配图</div>' 
         w = by_i.get(n) or {}
         title = w.get("title") or it["title"]
         body = w.get("body") or "（这轮没调模型，只有筛选结果；配上 AI key 再跑一次就有正文）"
         tags = w.get("tags") or []
         tagline = " ".join("#" + re.sub(r"\s+", "", t).lstrip("#") for t in tags)
         cards.append(f"""<section class="card">
-  <div class="cov"><img src="cover/{n}.png" alt="封面 {n}" loading="lazy"></div>
+  {pic}
   <div class="txt">
     <div class="rank">0{n} · {'/'.join(it['platforms'])} 第{it['rank']}位
       <span class="sc">匹配度 {row['score']}</span></div>
@@ -262,11 +290,12 @@ def render_pack(picked, wrote, site, handle="", now=None):
     <div class="tags">{html.escape(tagline)}</div>
     <div class="src">原文：<a href="{html.escape(it['url'])}" rel="noreferrer">{html.escape(it['url'][:90])}</a></div>
     <div class="why">{html.escape('｜'.join(row['why']))}</div>
+    {nopic}
   </div>
 </section>""")
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>小红书图文包 · {now:%Y-%m-%d}</title>
+<title>今日热点精选 · {now:%Y-%m-%d}</title>
 <style>
  body{{margin:0;background:#141418;color:#e9e9ef;
       font-family:"Noto Sans CJK SC","Microsoft YaHei",system-ui,sans-serif}}
@@ -276,6 +305,7 @@ def render_pack(picked, wrote, site, handle="", now=None):
  .card{{display:flex;gap:22px;background:#1c1c22;border:1px solid #2a2a33;border-radius:16px;
        padding:18px;margin-bottom:20px}}
  .cov{{flex:0 0 300px}} .cov img{{width:300px;border-radius:12px;display:block}}
+ .cov.nopic{{color:#7f7f8c;font-size:13px;align-self:center;line-height:1.6}}
  .txt{{flex:1;min-width:0}} h2{{margin:6px 0 12px;font-size:26px;line-height:1.4}}
  pre.body{{white-space:pre-wrap;font:inherit;line-height:1.9;margin:0 0 14px;color:#dcdce4}}
  .rank{{font-size:13px;color:#9a9aa6}} .sc{{color:#ffd479;margin-left:8px}}
@@ -284,13 +314,14 @@ def render_pack(picked, wrote, site, handle="", now=None):
  .why{{font-size:12px;color:#66d9a0}}
  a{{color:#6ec1ff}}
 </style></head><body>
-<header><h1>小红书图文包 · {now:%m-%d}（{len(picked)} 条）</h1>
-<div class="sub">封面图 + 标题 + 正文 + 话题，一条一条照着发即可。{'@' + handle if handle else ''}</div></header>
+<header><h1>今日热点精选 · {now:%m-%d}（{len(picked)} 条）</h1>
+<div class="sub">标题 + 正文 + 话题 + 原贴链接，一条一条照着发即可。{'@' + handle if handle else ''}</div></header>
 <div class="wrap">{''.join(cards)}</div></body></html>"""
 
 
-def push_feishu(site, n, first_title):
-    """推飞书。小红书没有官方发帖接口，这里只把图文包链接递到手机上，发帖还是手动。"""
+def push_feishu(site, n, first_title, with_pic=0):
+    """推飞书。只递一个链接过去——飞书自定义机器人发不了外链图片，
+    原贴配图只能在页面里看，所以「有几条带图」写进正文里说明白。"""
     webhook = os.environ.get("FEISHU_WEBHOOK_URL", "").strip()
     if not webhook:
         print("  ⚠️ 没配 FEISHU_WEBHOOK_URL，跳过飞书推送")
@@ -298,9 +329,10 @@ def push_feishu(site, n, first_title):
     import notify_x_card as nxc          # 复用已经跑通的卡片结构，别再写一遍
     # 首行固定带「热点」：飞书自定义机器人的关键词校验靠它过
     content = "\n".join([
-        f"📮 今日热点 · 小红书图文包（{n} 条）", "",
-        "封面图 + 标题 + 正文 + 话题都排好了，点开照着发：",
-        f"[📕 打开图文包]({site}/xhs/pack.html)",
+        f"📮 今日热点精选（{n} 条）", "",
+        "标题 + 正文 + 话题 + 原贴配图链接都排好了，点开照着发：",
+        f"[📕 打开今日热点精选]({site}/xhs/pack.html)",
+        f"（{with_pic}/{n} 条原贴带图，其余的热榜链接是搜索页/列表页，本来就没图）",
         "", f"首条：{first_title}",
     ])
     ok, body = nxc.post(webhook, nxc.build_payload(content))
@@ -323,18 +355,20 @@ def selftest():
     assert sc[0]["item"]["title"].startswith("商k"), sc[0]
     assert sc[-1]["item"]["title"].startswith("购房贷款"), "新闻腔没被压分"
     picked = pick_top(sc, 2, ["楼市", "翻车"])
+    assert "补位（没对上爆款源）" in picked[1]["why"], picked[1]
     assert len(picked) == 2
+    picked[0]["item"]["orig"] = "https://e.com/p.jpg"
     page = render_pack(picked, [{"i": 1, "title": "标题", "body": "正文", "tags": ["a"]}],
                        "https://example.com")
-    assert "cover/1.png" in page and "标题" in page
+    assert 'src="https://e.com/p.jpg"' in page and "标题" in page
+    assert "原贴没给配图" in page, "没有原图的那条不该配图"
+    assert "cov nopic" not in page, "没图的条目不该留空列"
     assert "<script" not in page, "转义没做"
     got = _xhs_parse('\u0060\u0060\u0060json\n[{"i":1,"title":"标题","paras":["第一段","第二段"],"tags":"#a、b"}]\n\u0060\u0060\u0060')
     assert got and got[0]["body"] == "第一段\n\n第二段" and got[0]["tags"] == ["a", "b"], got
     assert _xhs_parse("模型今天罢工了") == []
     assert _xhs_parse('[{"title":"t","paras":["a"],"i":"7"}]')[0]["i"] == 7
-    body = cover_html(1, "标题", "虎扑 第1位", "https://example.com")
-    assert "1080px" in body and "标题" in body
-    print("selftest OK — 打分 / 去广告 / 降新闻腔 / 挑选 / 打包 / 封面 都正常")
+    print("selftest OK — 打分 / 去广告 / 降新闻腔 / 挑选 / 打包 / 配图 都正常")
 
 
 def main():
@@ -372,13 +406,12 @@ def main():
               + (f"   ← {'｜'.join(row['why'])}" if args.explain else ""))
 
     wrote = [] if args.no_ai else xhs_write(picked, fp)
+    for row in picked:
+        row["item"]["orig"] = fetch_og_image(row["item"]["url"])
+    got = sum(1 for r in picked if r["item"].get("orig"))
+    print(f"  原贴配图：{got}/{len(picked)} 条有（热榜链大多是搜索页，没有就不配图）")
     out = Path(args.out_dir)
-    (out / "cover").mkdir(parents=True, exist_ok=True)
-    for n, row in enumerate(picked, 1):
-        it = row["item"]
-        (out / "cover" / f"{n}.html").write_text(
-            cover_html(n, html.escape(it["title"]), f"{'/'.join(it['platforms'])} 第{it['rank']}位",
-                       args.site), encoding="utf-8")
+    out.mkdir(parents=True, exist_ok=True)
     (out / "pack.html").write_text(render_pack(picked, wrote, args.site, args.handle),
                                    encoding="utf-8")
     (out / "pack.json").write_text(json.dumps(
@@ -386,9 +419,9 @@ def main():
          "why": r["why"], "title": r["item"]["title"], "url": r["item"]["url"]}
          for n, r in enumerate(picked, 1)], "notes": wrote}, ensure_ascii=False, indent=1),
         encoding="utf-8")
-    print(f"图文包：{out/'pack.html'}（{len(picked)} 张封面待截图：{out/'cover'}）")
+    print(f"图文包：{out/'pack.html'}")
     if wrote and picked:
-        push_feishu(args.site, len(picked), picked[0]["item"]["title"][:30])
+        push_feishu(args.site, len(picked), picked[0]["item"]["title"], got)
 
 
 if __name__ == "__main__":
