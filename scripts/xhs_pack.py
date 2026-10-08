@@ -141,6 +141,9 @@ def _xhs_prompt(picked, fp):
     return "\n".join(user)
 
 
+_XHS_BATCH = 5          # 一次要 10 条整篇正文，模型容易写到一半就断
+
+
 def _xhs_parse(text):
     """小红书版解析：gen_x_card._ai_parse 只认「title + paras」那套字段，
     直接拿来用会把 body/tags 全丢掉（实测成稿 0 条）。这里按同一套容错思路
@@ -178,7 +181,11 @@ def _xhs_parse(text):
             tags = re.split(r"[、,，#\s]+", tags)
         tags = [str(x).strip().lstrip("#") for x in tags if str(x).strip()]
         if title and paras:
-            out.append({"i": it.get("i") or n, "title": gx._normalize_quotes(title),
+            try:
+                idx = int(it.get("i") or n)
+            except (TypeError, ValueError):
+                idx = n
+            out.append({"i": idx, "title": gx._normalize_quotes(title),
                         "body": "\n\n".join(gx._normalize_quotes(x) for x in paras),
                         "tags": tags})
     return out
@@ -190,13 +197,19 @@ def xhs_write(picked, fp, now=None):
     if not key:
         print("  ⚠️ 没配 AI key，跳过二创，这轮只出筛选结果和封面")
         return []
-    raw = gx._ai_call(key, base, model, _XHS_SYSTEM, _xhs_prompt(picked, fp))
-    got = _xhs_parse(raw)
+    got, last = [], ""
+    # 分小批写：一次要 10 条长正文容易撞输出上限，也被限流一枪打死整批。
+    for k in range(0, len(picked), _XHS_BATCH):
+        chunk = picked[k:k + _XHS_BATCH]
+        last = gx._ai_call(key, base, model, _XHS_SYSTEM, _xhs_prompt(chunk, fp))
+        for x in _xhs_parse(last):
+            x["i"] += k                      # 分批后编号要从整批的序号起算
+            got.append(x)
     print(f"  AI 二创：{len(picked)} 条 -> 成稿 {len(got)} 条")
     if not got:
         # 打一小段原文，省得下次还得翻整轮日志才知道模型交了什么
         print("  ⚠️ 模型没写出合格内容（多半是限流或太弱）："
-              + " ".join((raw or "(空)").split())[:200])
+              + " ".join((last or "(空)").split())[:200])
     return got
 
 
@@ -318,6 +331,7 @@ def selftest():
     got = _xhs_parse('\u0060\u0060\u0060json\n[{"i":1,"title":"标题","paras":["第一段","第二段"],"tags":"#a、b"}]\n\u0060\u0060\u0060')
     assert got and got[0]["body"] == "第一段\n\n第二段" and got[0]["tags"] == ["a", "b"], got
     assert _xhs_parse("模型今天罢工了") == []
+    assert _xhs_parse('[{"title":"t","paras":["a"],"i":"7"}]')[0]["i"] == 7
     body = cover_html(1, "标题", "虎扑 第1位", "https://example.com")
     assert "1080px" in body and "标题" in body
     print("selftest OK — 打分 / 去广告 / 降新闻腔 / 挑选 / 打包 / 封面 都正常")
