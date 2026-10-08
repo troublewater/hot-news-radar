@@ -31,6 +31,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
@@ -1345,13 +1346,20 @@ def _ai_call(key, base, model, system, user):
         base + "/chat/completions", data=body, method="POST",
         headers={**_HEADERS, "Authorization": "Bearer " + key,
                  "Content-Type": "application/json"})
-    for attempt in (1, 2):                        # 429/超时多半是抖动，隔几秒再来一次
+    for attempt in (1, 2, 3):                    # 429/超时多半是抖动，退避几秒再来一次
         try:
             with urllib.request.urlopen(req, timeout=_AI_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode("utf-8", "ignore"))
             return data["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as exc:
+            # 免费档限流是常态：这一轮前面几步也在这条 key 上跑，额度是被自己用掉的，
+            # 所以 429 要给足退避时间，不能跟网络抖动一样隔 6 秒就撞第二下。
+            if attempt == 3 or exc.code not in (429, 500, 502, 503, 504):
+                print(f"  ⚠️ AI 改写失败：{type(exc).__name__}: {exc}")
+                return ""
+            time.sleep(15 * attempt)
         except Exception as exc:                 # noqa: BLE001 - 模型挂了就退回原贴
-            if attempt == 2:
+            if attempt == 3:
                 print(f"  ⚠️ AI 改写失败：{type(exc).__name__}: {exc}")
                 return ""
             time.sleep(6)
