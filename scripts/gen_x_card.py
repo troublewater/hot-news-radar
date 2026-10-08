@@ -1228,23 +1228,41 @@ def bangdan_fingerprint(rows, sample=60):
 
 
 # 高频词统计要拦掉的常见字，不拦的话三字窗全是「你可以」「这就是」这种
-_BD_STOP = "我们你们他们这个那个就是不是没有可以什么怎么因为所以但是真的现在自己一个两个很多知道其实已经"
+_BD_STOP = ("我们你们他们这个那个就是不是没有可以什么怎么因为所以但是真的现在自己"
+            "一个两个很多知道其实已经觉得直接结果然后而且甚至当时居然到底东西事情"
+            "好几出来到了今天视频使用订单少钱牛逼")
 
 
-def _bd_terms(rows, n=3, top=12):
-    """爆款正文里的高频 N 字词，用来提示词库该补哪些词（纯滑窗计数，不引依赖）。"""
+def _bd_terms(rows, top=12):
+    """爆款正文里的高频词。没有分词器，就用 2~4 字滑窗计数，再把「碎片」扔掉。
+
+    长词会给自己的每个子窗都记一次（字节跳动 -> 字节跳/节跳动，紧急刹车 -> 紧急刹/急刹车）。
+    不去掉的话榜单全是碎片，新闻标题闭着眼都能撞上一个（实测「免费升」「夏新闻」全在榜），
+    筛选规则就等于摆设，所以：只留没有被「差不多同样多的更长词」包住的那几个。
+    """
     cnt = Counter()
     for r in (rows or [])[:120]:
         t = r["text"]
-        for i in range(len(t) - n + 1):
-            g = t[i:i + n]
-            if re.fullmatch(r"[\u4e00-\u9fff]{%d}" % n, g) and not any(c in _BD_STOP for c in g):
-                cnt[g] += 1
+        for n in (2, 3, 4):
+            for i in range(len(t) - n + 1):
+                g = t[i:i + n]
+                if re.fullmatch(r"[\u4e00-\u9fff]{%d}" % n, g) and not any(c in _BD_STOP for c in g):
+                    cnt[g] += 1
+    # 两字词里混着「直接 / 结果 / 觉得」这种口水词，门槛抬高一点；三字以上一般就是实词了
+    cands = [g for g, c in cnt.most_common(400) if c >= (5 if len(g) == 2 else 3)]
+    keep, seen = [], set()
+    for g in cands:
+        # 更长且占了它一半以上出现的词在场，就当 g 是那个词的碎片
+        if any(h != g and g in h and cnt[h] * 2 >= cnt[g] for h in cands):
+            continue
+        if g not in seen:
+            seen.add(g)
+            keep.append(g)
     try:
         library = _FREQ_PATH.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         library = ""
-    return [(g, c) for g, c in cnt.most_common(80) if c >= 3 and g not in library][:top]
+    return [(g, cnt[g]) for g in keep if g not in library][:top]
 
 
 def _bangdan_prompt(fp):
