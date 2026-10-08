@@ -126,6 +126,11 @@ def pick_top(scored, top, keywords):
     for i, row in enumerate(scored):
         if i in taken:
             continue
+        kws = {"kw:" + w for w in sigs[i]}
+        if kws and all(used.get(k, 0) >= 2 for k in kws):
+            continue          # 补位也不让同一个事件再来一条（尊界那三条就是这么回来的）
+        for k in kws:
+            used[k] = used.get(k, 0) + 1
         row["why"].append("补位（没对上爆款源）")
         taken.add(i)
         picked.append(row)
