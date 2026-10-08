@@ -33,7 +33,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_x_card as gx          # noqa: E402  复用解析 / 爆款源 / AI / 站点常量
 
-# 爆款风格 -> 标题里长什么样的更贴。风向说今天哪几类跑得动，就照这几类加分。
+# 爆款源提供的是「选什么题、用什么角度写」：今天风向里哪几类跑得动，就照这几类去
+# 找有潜力的新闻。**不是**拿标题去跟爆款正文撞词——撞上了说明该直接搬爆款，
+# 用不着费劲找新闻源。
 _STYLE_HINT = [
     ("奇观猎奇", r"奇观|罕见|首次|首例|第一次|离谱|魔幻|奇葩|惊呆|破纪录|极限|第一人"),
     ("暴论观点", r"争议|吵|怼|怒|骂|反驳|质疑|不满|抵制|炮轰|打脸|开撕"),
@@ -42,38 +44,52 @@ _STYLE_HINT = [
     ("都市夜话", r"男子|女子|大爷|大妈|小伙|业主|邻居|室友|同事|顾客|外卖|司机"),
     # 「快讯播报」故意不列：通报体是照实写的那种，正是二创写不出东西的题
 ]
-# 有冲突才有故事性：平淡的正经消息在小红书没人点
-_CONFLICT = re.compile(
-    r"反转|翻车|被骗|被坑|罚款|赔偿|起诉|告上|怒|吵|塌房|退款|维权|抵制|冲突|争议|道歉|打|砸|逃")
 
-# 提问帖没有可写的"事"，二创只能抄问题，压下去
-_ASK = re.compile(r"^如何看待|^怎么看|^如何看|^如何评价|是什么体验|求推荐|值得买吗")
+# 「写得出爆款吗」——这才是入选门槛。爆款的共同点是：有具体的人、有件具体的事、
+# 有反转或反差、落在一个能引起共鸣的话题上。光热但没法讲的（政策、财报、发布会、
+# 提问帖、工具推荐）一律不选。
+_STORY = [
+    ("有具体的人", r"男子|女子|大爷|大妈|小伙|姑娘|女孩|男孩|业主|邻居|室友|同事|顾客|"
+                 r"外卖|快递|司机|游客|父亲|母亲|儿子|女儿|夫妻|爷爷|奶奶|老人|孩子|"
+                 r"工人|老师|医生|学生|博主|老板|房东|新娘|新郎|家长"),
+    ("有冲突", r"反转|翻车|被坑|被骗|维权|投诉|吐槽|怒|吵|起诉|罚款|赔|抵制|退款|撕|"
+             r"举报|纠纷|闹|拦|抢|逃|骗"),
+    ("有反差", r"断裂|断了|塌|崩|爆炸|炸裂|离谱|奇葩|罕见|首次|首例|第一次|奇观|魔幻|"
+             r"惊|居然|竟然"),
+    ("婚恋家庭", r"彩礼|结婚|离婚|婚|婆媳|丈母娘|夫妻|份子钱|相亲|带娃|养娃"),
+    ("有具体数字", r"[0-9０-９一二三四五六七八九十]+[个条名辆次岁人元万块天年万亿]"),
+]
+_CONFLICT = re.compile(r"反转|翻车|被骗|被坑|罚款|赔偿|起诉|告上|怒|吵|塌房|退款|维权|抵制|冲突|争议|道歉|打|砸|逃")
+
+# 提问帖 / 工具推荐：没有可讲的「事」，二创只能抄问题或照着说明书复述
+_ASK = re.compile(r"^如何看待|^怎么看|^如何看|^如何评价|是什么体验|求推荐|值得买吗|"
+                  r"哪个好|哪个工具|怎么用|如何配置|注册|订阅|教程|好用吗")
+# 没有可讲的事的选题：落到「数据好看但写不出故事」
+_FACT_ONLY = re.compile(r"签署|协议|财报|季度|同比|增长|指数|收盘|开盘|涨幅|招标|"
+                        r"上线|发布|获批|印发|试点|规划|部署|架构|开源")
 
 
 def score_news(items, fp, keywords):
-    """给每条新闻打分。分项全部写进 why，方便人一眼看出为什么选它。"""
+    """给每条新闻打分：够不够「爆款相」。分项全部写进 why，方便人一眼看出为什么选它。"""
     styles = {s for s in gx._bd_named(fp.get("styles", []), 4, skip="其他")}
     out = []
     for it in items:
         t = it["title"]
         if gx._AD_HOT.search(t):          # 广告 / 开售稿直接踢，别再让它混进 TOP1
             continue
-        why, sc, src = [], 0.0, False
-        # 长词更具体：三字以上才给满分，两字（中国/觉得这种）减半，免得口水词顶掉真题材
+        why, sc = [], 0.0
+        story = [name for name, pat in _STORY if re.search(pat, t)]
+        if story:
+            sc += 3 * len(story)
+            why += story
+        # 对上今天跑得动的风格：同样的事，风向里的角度更容易跑起来
+        style = [name for name, pat in _STYLE_HINT if name in styles and re.search(pat, t)]
+        sc += 2 * len(style)
+        why += [f"贴「{n}」" for n in style]
         hit = sorted([w for w in keywords if w in t], key=len, reverse=True)
-        if hit:
-            sc += sum(4 if len(w) >= 3 else 2 for w in hit[:2])
-            why.append("题材词 " + "/".join(hit[:3]))
-            # 两字词（中国/美国）太泛，光靠它不算「对上爆款源」，得有个三字以上的实词
-            src = any(len(w) >= 3 for w in hit)
-        for name, pat in _STYLE_HINT:
-            if name in styles and re.search(pat, t):
-                sc += 3
-                why.append(f"贴「{name}」")
-                src = True
-        if _CONFLICT.search(t):
+        if any(len(w) >= 3 for w in hit):      # 撞上爆款源的高频词算加分，但不是门槛
             sc += 2
-            why.append("有冲突")
+            why.append("题材词 " + "/".join(hit[:2]))
         n = len(it["platforms"])
         if n >= 2:
             sc += 2
@@ -84,13 +100,17 @@ def score_news(items, fp, keywords):
             sc += 2
             why.append("榜内前三")
         if _ASK.search(t):
+            sc -= 4
+            why.append("提问帖/工具贴（没故事可讲）")
+        if _FACT_ONLY.search(t) and len(story) < 2:
             sc -= 3
-            why.append("提问帖（难二创）")
+            why.append("只有数据没有事")
         if gx._NEWSY_TITLE.search(t):
             sc -= 4
             why.append("新闻腔（只能照实写）")
-        # src=False 的条目「热」但不贴爆款源，只配当候补
-        out.append({"score": round(sc, 1), "why": why, "item": it, "src": src})
+        # 够格入选：至少两个「有故事」的信号，或者一个信号 + 对上今天的风向
+        fit = len(story) >= 2 or bool(story and style)
+        out.append({"score": round(sc, 1), "why": why, "item": it, "fit": fit})
     out.sort(key=lambda x: -x["score"])
     return out
 
@@ -103,14 +123,13 @@ def pick_top(scored, top, keywords):
     """
     sigs = [{w for w in keywords if w in r["item"]["title"]} for r in scored]
     picked, used, taken = [], {}, set()
-    for cap in (2, 3):
+    for cap in (3, 4):
         for i, row in enumerate(scored):
-            if i in taken or not row.get("src"):
-                continue          # 没跟爆款源对上的，宁可空着也不凑数
+            if i in taken or not row.get("fit"):
+                continue          # 没有故事相的，热也不选
             groups = {g for g in (next((w for w in gx._THEME_WORDS if w in row["item"]["title"]), None),
                                   row["item"]["group"] or "其他") if g}
             kws = {"kw:" + w for w in sigs[i]}
-            # 命中了题材词就按题材词算：同一个词始终是同一个事件，不放宽
             room = (any(used.get(k, 0) < 2 for k in kws) if kws
                     else any(used.get(k, 0) < cap for k in groups))
             if not room:
@@ -121,17 +140,17 @@ def pick_top(scored, top, keywords):
             picked.append(row)
             if len(picked) >= top:
                 return picked
-    # 兜底：够格的不到 10 条时按分数补位，但把「这条没对上爆款源」写进理由，
-    # 免得跟真匹配的混在一起，事后分不清哪些是硬凑的
+    # 兜底：够格的不到 10 条时按分数补位，但把「这条没有故事相」写进理由，
+    # 免得跟真够格的混在一起，事后分不清哪些是硬凑的
     for i, row in enumerate(scored):
         if i in taken:
             continue
         kws = {"kw:" + w for w in sigs[i]}
         if kws and any(used.get(k, 0) >= 2 for k in kws):
-            continue          # 补位也不让同一个事件再来一条（尊界那三条就是这么回来的）
+            continue          # 补位也不让同一个事件再来一条
         for k in kws:
             used[k] = used.get(k, 0) + 1
-        row["why"].append("补位（没对上爆款源）")
+        row["why"].append("备选（没有故事相）")
         taken.add(i)
         picked.append(row)
         if len(picked) >= top:
@@ -148,9 +167,11 @@ _XHS_SYSTEM = """你在给一个小红书账号写笔记，素材是当天的热
 4. 写故事、写感受，不写新闻稿。禁用语：记者、据报道、相关部门、引发热议、值得深思。
 5. 必须落到具体：一个具体的人、一个具体数字、一次转折。
 6. 全角标点；引号用「」；不要英文引号。
-7. 可以自由改编、补细节、换人名，但不要加「网传」「据称」这种免责词。
-   官方通报类照实写，不要编。
-8. 最后一句给个有态度的收束，能从前面推出来；放到别的故事上也成立的就是废话，重写。
+7. 不许编事实。新闻里没写名字就用不具名说法（「当事女生」「这家店的老板」「一位业主」）；
+   绝对不许出现「李强」「赵工」「张阿姨」「王先生」这种自己起的人名，公司名、机构名、
+   数字也只用原文有的。信息不够就把篇幅写短，别硬凑细节。
+8. 不要加「网传」「据称」这种免责词；官方通报类照实写。
+9. 最后一句给个有态度的收束，能从前面推出来；放到别的故事上也成立的就是废话，重写。
 
 只输出 JSON 数组，按输入的编号顺序，不要解释、不要 ``` 包裹：
 [{"i": 1, "title": "标题", "paras": ["第一段", "第二段"], "tags": ["话题1", "话题2"]}]"""
@@ -359,8 +380,9 @@ def selftest():
     assert all("开售" not in r["item"]["title"] for r in sc), "广告稿没被踢掉"
     assert sc[0]["item"]["title"].startswith("商k"), sc[0]
     assert sc[-1]["item"]["title"].startswith("购房贷款"), "新闻腔没被压分"
+    assert sc[0]["fit"] and not sc[-1]["fit"], "「有故事」才该够格，政策稿不该"
     picked = pick_top(sc, 2, ["楼市", "翻车"])
-    assert "补位（没对上爆款源）" in picked[1]["why"], picked[1]
+    assert "备选（没有故事相）" in picked[1]["why"], picked[1]
     assert len(picked) == 2
     picked[0]["item"]["orig"] = "https://e.com/p.jpg"
     page = render_pack(picked, [{"i": 1, "title": "标题", "body": "正文", "tags": ["a"]}],
@@ -373,7 +395,7 @@ def selftest():
     assert got and got[0]["body"] == "第一段\n\n第二段" and got[0]["tags"] == ["a", "b"], got
     assert _xhs_parse("模型今天罢工了") == []
     assert _xhs_parse('[{"title":"t","paras":["a"],"i":"7"}]')[0]["i"] == 7
-    print("selftest OK — 打分 / 去广告 / 降新闻腔 / 挑选 / 打包 / 配图 都正常")
+    print("selftest OK — 爆款相打分 / 去广告 / 挑故事 / 打包 / 配图 都正常")
 
 
 def main():
