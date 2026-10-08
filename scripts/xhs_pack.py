@@ -276,7 +276,9 @@ def xhs_write(picked, fp, now=None):
                 x["i"] += k                  # 分批后编号要从整批的序号起算
                 if x["i"] not in have:
                     part.append(x)
-            if len(part) >= len(chunk):
+            # 只在「交了一半」时补要一次：整批为空基本是限流/超时，
+            # 再要一次等于把 180 秒的等待翻倍（实测能把一个步骤拖到 40 分钟）
+            if len(part) >= len(chunk) or not part:
                 break
         print(f"    第 {k // _XHS_BATCH + 1} 批：{len(chunk)} 条 -> 成稿 {len(part)} 条")
         got += part
