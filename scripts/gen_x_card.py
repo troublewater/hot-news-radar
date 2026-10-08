@@ -1780,6 +1780,19 @@ def main():
             "hooksupdate.md 的 MACHINE:HOOKS 没读到，钩子表退回内置默认值了"
         assert _title_bare("不懂就问：这到底合不合规？"), "抄例句的标题没被拦"
         assert _title_bare("卧槽，真的假的？"), "短得没信息的标题没被拦"
+        # 风向自动区 + 跨天累计：站点那份 hooksupdate.md 靠这两块每天刷新
+        auto = _splice_auto("A<!-- AUTO:BANGDAN -->\n旧\n<!-- /AUTO:BANGDAN -->B", "新")
+        assert "新" in auto and "旧" not in auto, auto
+        assert _splice_auto("没有标记", "新") == "没有标记"
+        rows4 = [{"text": "暴论：这彩礼还能临时涨价，男方当场就走了", "cat": "none",
+                  "name": "x", "handle": "x", "v": 100, "l": 1}] * 3
+        h4 = [{"d": "2026-10-04", "hooks": [["暴论", 4]], "styles": [["暴论观点", 3]],
+               "terms": []},
+              {"d": "2026-10-05", "hooks": [["暴论", 4]], "styles": [["暴论观点", 3]],
+               "terms": []}]
+        body = render_bangdan_auto(bangdan_fingerprint(rows4), [("彩礼", 5)], h4,
+                                   now=datetime(2026, 10, 6))
+        assert "暴论" in body and "彩礼" in body and "2/2 天" in body, body
         assert not _title_bare("不懂就问：楼下装修三年没人管，物业说管不了"), \
             "钩子接上事由的正常标题被误杀了"
         # 一批挂掉不该把后面的批全废掉：限流是随机的，接着试还能捞回来
@@ -1962,11 +1975,20 @@ def main():
     stories = [] if args.no_stories else collect_stories(args.story_top)
     # 爆款源：X 中文区的实时风向。抓不到就当没有，不影响出稿。
     bang = [] if args.no_bangdan else fetch_bangdan()
+    fp = bangdan_fingerprint(bang)
+    terms = _bd_terms(bang)
     (out / "bangdan.md").write_text(render_bangdan(bang), encoding="utf-8")
-    # 二创规范（hooksupdate.md）也复制一份到站点：豆包那边读同一个 URL，两边就同一份
+    # 记一笔历史（跨天累计看这个），再把当日风向刷进规范里那块 AUTO:BANGDAN
+    hist = _bd_history(out)
+    if fp["n"]:
+        _bd_save_history(out, hist, fp, terms)
+    # 二创规范（hooksupdate.md）也复制一份到站点：豆包那边读同一个 URL，两边就同一份。
+    # 站点那份额外把「今日爆款风向」刷成今天的，豆包不用再去翻 bangdan.md。
     memo = Path(__file__).resolve().parent.parent / "hooksupdate.md"
     if memo.is_file():
-        (out / "hooksupdate.md").write_bytes(memo.read_bytes())
+        (out / "hooksupdate.md").write_text(
+            _splice_auto(memo.read_text(encoding="utf-8", errors="ignore"),
+                        render_bangdan_auto(fp, terms, hist)), encoding="utf-8")
     # collect_stories 里已经补过正文（换不到原文的已丢掉），这里不用再补一次。
     # 板块二优先走 AI 改编：抓来的原贴读起来断章取义（摘要 + 几个热评拼在一起），
     # 用户要的是「热搜话题 -> 有人有事的小故事」。改写失败就退回原贴，不开天窗。
@@ -1998,15 +2020,85 @@ def main():
         src_note = "⚠️ 没抓到故事，退回榜单标题"
     print(f"板块二 素材      {src_note} -> {out/'copy.txt'}"
           f"，最长一条 {per} 字符 {warn}")
-    if bang:
-        fpb = bangdan_fingerprint(bang)
-        print(f"爆款源 风向      {fpb['n']:>3} 条样本 -> {out/'bangdan.md'}"
-              f"，跑得动：{'、'.join(_bd_named(fpb['hooks'], 4))}")
+    if fp["n"]:
+        print(f"爆款源 风向      {fp['n']:>3} 条样本 -> {out/'bangdan.md'}"
+              f"，跑得动：{'、'.join(_bd_named(fp['hooks'], 4))}"
+              f"，历史 {len(hist)} 天")
     else:
         print("爆款源 风向      ⚠️ 没抓到，这轮只按新闻源出稿")
     shown = (posted or sorted(items, key=_sort_key))[: args.story_top if posted else args.copy_top]
     for i, it in enumerate(shown, 1):
         print(f"  {i:>2}. {it['title'][:44]}")
+
+
+# ── 爆款风向的「累计」：每天记一笔，hooksupdate.md 里那块自动风向才有跨天数据 ──
+_BD_HIST_FILE = "bangdan_history.json"    # 落在 docs/x/ 下，跟着 reports 分支走
+_BD_HIST_DAYS = 30
+
+
+def _bd_history(out_dir):
+    """读历史风向。流水线先把 reports 分支上那份恢复到 out/，读不到就是第一次跑。"""
+    try:
+        data = json.loads((Path(out_dir) / _BD_HIST_FILE).read_text(
+            encoding="utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        return []
+    return [d for d in data if isinstance(d, dict)][-_BD_HIST_DAYS:]
+
+
+def _bd_save_history(out_dir, hist, fp, terms, now=None):
+    """把今天这笔追加进去，只留最近 30 天。hist 原地增长，调用方接着拿它渲染。"""
+    now = now or datetime.now()
+    hist.append({"d": f"{now:%Y-%m-%d}", "n": fp["n"], "mid": fp["len_mid"],
+                 "hooks": fp["hooks"][:8], "styles": fp["styles"][:6],
+                 "terms": terms or []})
+    (Path(out_dir) / _BD_HIST_FILE).write_text(
+        json.dumps(hist[-_BD_HIST_DAYS:], ensure_ascii=False), encoding="utf-8")
+
+
+_AUTO_RE = re.compile(
+    r"(<!--\s*AUTO:BANGDAN\s*-->)(.*?)(<!--\s*/AUTO:BANGDAN\s*-->)", re.S)
+
+
+def _splice_auto(text, body):
+    """把「今日爆款风向」塞进 hooksupdate.md 的 AUTO:BANGDAN 区块（站点那份每天刷新）。"""
+    return _AUTO_RE.sub(lambda m: m.group(1) + "\n" + body.strip() + "\n" + m.group(3),
+                        text, count=1)
+
+
+def _bd_days(hist, key, skip, need=2):
+    """近 7 天里某个开头 / 风格出现了几天。跨天还在 = 不是偶然，才值得写进规范。"""
+    week = hist[-7:]
+    cnt = Counter()
+    for day in week:
+        for name, n in day.get(key) or []:
+            if name not in skip and n >= need:      # 当天只露一次的不算
+                cnt[name] += 1
+    return cnt, len(week)
+
+
+def render_bangdan_auto(fp, terms, hist, now=None):
+    """hooksupdate.md 里「今日爆款风向」那一块：今天什么样 + 近 7 天一直什么样。"""
+    now = now or datetime.now()
+    if not fp.get("n"):
+        return "（今天没抓到爆款源，这一块保持上一次的内容，不影响出稿。）"
+    out = [f"**{now:%Y-%m-%d}** —— X 上今天跑得动的是 "
+           f"{'、'.join(_bd_named(fp['hooks'], 4)) or '没量出明显套路'} 这类开头，"
+           f"爆款正文中位 {fp['len_mid']} 字。今天优先用这几个钩子。", "",
+           "真开头（只学口气和节奏，人和事必须新编）："]
+    out += [f"- {t}" for t in fp["openers"][:4]]
+    hc, days = _bd_days(hist, "hooks", {"无钩子"})
+    sc, _ = _bd_days(hist, "styles", {"其他"})
+    if days > 1 and hc:
+        out += ["", f"近 {days} 天反复跑得动的开头（跨天还在，优先用）："
+                    + "、".join(f"{k} {v}/{days} 天" for k, v in hc.most_common(6))]
+    if days > 1 and sc:
+        out += [f"近 {days} 天反复跑得动的风格："
+                + "、".join(f"{k} {v}/{days} 天" for k, v in sc.most_common(4))]
+    if terms:
+        out += ["今天爆款里的高频题材词（想加就加进 config/frequency_words.txt）："
+                + "  ".join(f"{g}({c})" for g, c in terms[:8])]
+    return "\n".join(out)
 
 
 if __name__ == "__main__":
