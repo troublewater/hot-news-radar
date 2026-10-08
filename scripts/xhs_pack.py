@@ -112,7 +112,7 @@ _XHS_SYSTEM = """你在给一个小红书账号写笔记，素材是当天的热
 
 小红书的规矩（跟推文不一样，别写成推文）：
 1. 标题 ≤ 20 字，要有情绪 / 悬念 / 数字，可以带 1~2 个 emoji。
-2. 正文 200~450 字，全口语、短句、多换行；用 emoji 当小标题分 2~4 点。
+2. 正文 200~450 字，全口语、短句、多换行；拆成 2~4 段放进 paras，段间自动空一行。
 3. 结尾单独一行给 6~10 个话题标签，纯词，不要 # 号。
 4. 写故事、写感受，不写新闻稿。禁用语：记者、据报道、相关部门、引发热议、值得深思。
 5. 必须落到具体：一个具体的人、一个具体数字、一次转折。
@@ -122,7 +122,7 @@ _XHS_SYSTEM = """你在给一个小红书账号写笔记，素材是当天的热
 8. 最后一句给个有态度的收束，能从前面推出来；放到别的故事上也成立的就是废话，重写。
 
 只输出 JSON 数组，按输入的编号顺序，不要解释、不要 ``` 包裹：
-[{"i": 1, "title": "标题", "body": "正文", "tags": ["话题1", "话题2"]}]"""
+[{"i": 1, "title": "标题", "paras": ["第一段", "第二段"], "tags": ["话题1", "话题2"]}]"""
 
 
 def _xhs_prompt(picked, fp):
@@ -141,6 +141,49 @@ def _xhs_prompt(picked, fp):
     return "\n".join(user)
 
 
+def _xhs_parse(text):
+    """小红书版解析：gen_x_card._ai_parse 只认「title + paras」那套字段，
+    直接拿来用会把 body/tags 全丢掉（实测成稿 0 条）。这里按同一套容错思路
+    自己解一遍：数组可能被围栏包着、也可能被输出上限截断，完整的那几条照用。
+    """
+    text = text or ""
+    data, start = [], text.find("[")
+    if start >= 0:
+        try:
+            data = json.loads(text[start:])
+        except ValueError:
+            dec, pos = json.JSONDecoder(), start + 1
+            while True:
+                nxt = text.find("{", pos)
+                if nxt < 0:
+                    break
+                try:
+                    obj, end = dec.raw_decode(text[nxt:])
+                except ValueError:
+                    pos = nxt + 1
+                    continue
+                data.append(obj)
+                pos = nxt + end
+    out = []
+    for n, it in enumerate(data if isinstance(data, list) else [], 1):
+        if not isinstance(it, dict):
+            continue
+        title = str(it.get("title", "")).strip()
+        paras = it.get("paras") or it.get("body") or []
+        if isinstance(paras, str):
+            paras = paras.split("\n")
+        paras = [str(x).strip() for x in paras if str(x).strip()]
+        tags = it.get("tags") or []
+        if isinstance(tags, str):
+            tags = re.split(r"[、,，#\s]+", tags)
+        tags = [str(x).strip().lstrip("#") for x in tags if str(x).strip()]
+        if title and paras:
+            out.append({"i": it.get("i") or n, "title": gx._normalize_quotes(title),
+                        "body": "\n\n".join(gx._normalize_quotes(x) for x in paras),
+                        "tags": tags})
+    return out
+
+
 def xhs_write(picked, fp, now=None):
     """交给模型写小红书文案。返回 [{i,title,body,tags}]，拿不到就返回空。"""
     key, base, model = gx._ai_config()
@@ -148,10 +191,12 @@ def xhs_write(picked, fp, now=None):
         print("  ⚠️ 没配 AI key，跳过二创，这轮只出筛选结果和封面")
         return []
     raw = gx._ai_call(key, base, model, _XHS_SYSTEM, _xhs_prompt(picked, fp))
-    got = [x for x in gx._ai_parse(raw) if x.get("title") and x.get("body")]
+    got = _xhs_parse(raw)
     print(f"  AI 二创：{len(picked)} 条 -> 成稿 {len(got)} 条")
     if not got:
-        print("  ⚠️ 模型没写出合格内容（多半是限流或太弱）")
+        # 打一小段原文，省得下次还得翻整轮日志才知道模型交了什么
+        print("  ⚠️ 模型没写出合格内容（多半是限流或太弱）："
+              + " ".join((raw or "(空)").split())[:200])
     return got
 
 
@@ -270,6 +315,9 @@ def selftest():
                        "https://example.com")
     assert "cover/1.png" in page and "标题" in page
     assert "<script" not in page, "转义没做"
+    got = _xhs_parse('\u0060\u0060\u0060json\n[{"i":1,"title":"标题","paras":["第一段","第二段"],"tags":"#a、b"}]\n\u0060\u0060\u0060')
+    assert got and got[0]["body"] == "第一段\n\n第二段" and got[0]["tags"] == ["a", "b"], got
+    assert _xhs_parse("模型今天罢工了") == []
     body = cover_html(1, "标题", "虎扑 第1位", "https://example.com")
     assert "1080px" in body and "标题" in body
     print("selftest OK — 打分 / 去广告 / 降新闻腔 / 挑选 / 打包 / 封面 都正常")
