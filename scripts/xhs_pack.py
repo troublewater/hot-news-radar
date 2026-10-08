@@ -115,18 +115,32 @@ def score_news(items, fp, keywords):
     return out
 
 
-def pick_top(scored, top, keywords):
-    """同题材 / 同高频词别连占位。
+def _bigrams(text):
+    """标题的二字窗集合，用来判断两条是不是同一件事。"""
+    t = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text or "")
+    return {t[i:i + 2] for i in range(len(t) - 1)}
 
-    题材词命中说明「是同一个事件」（尊界那三条都含「尊界」），这类位子固定最多 2 个，
-    不跟着后面的放宽走；题材分组只是粗分类，不够 10 条时可以放宽到 3 个。
+
+def _same_event(a, b, need=3):
+    """两条标题共用 3 个以上二字窗就当成同一件事（婚礼/看病/离世 那种改写也算）。
+
+    单靠「题材词相同」不够：标题被改写过一次就对不上了（「新郎婚礼当天去医院看病后离世」
+    和「官方回应婚礼看病离世」一个关键词都不重合，结果同一个事占了两条）。
     """
+    return len(a & b) >= need
+
+
+def pick_top(scored, top, keywords):
+    """同一个事件别连占位：题材词相同的最多 2 条，标题高度重叠的最多 1 条。"""
     sigs = [{w for w in keywords if w in r["item"]["title"]} for r in scored]
-    picked, used, taken = [], {}, set()
+    bags = [_bigrams(r["item"]["title"]) for r in scored]
+    picked, used, taken, seen = [], {}, set(), []
     for cap in (3, 4):
         for i, row in enumerate(scored):
             if i in taken or not row.get("fit"):
                 continue          # 没有故事相的，热也不选
+            if any(_same_event(bags[i], b) for b in seen):
+                continue          # 同一个事，换了个说法也不行
             groups = {g for g in (next((w for w in gx._THEME_WORDS if w in row["item"]["title"]), None),
                                   row["item"]["group"] or "其他") if g}
             kws = {"kw:" + w for w in sigs[i]}
@@ -137,6 +151,7 @@ def pick_top(scored, top, keywords):
             for k in groups | kws:
                 used[k] = used.get(k, 0) + 1
             taken.add(i)
+            seen.append(bags[i])
             picked.append(row)
             if len(picked) >= top:
                 return picked
@@ -145,11 +160,9 @@ def pick_top(scored, top, keywords):
     for i, row in enumerate(scored):
         if i in taken:
             continue
-        kws = {"kw:" + w for w in sigs[i]}
-        if kws and any(used.get(k, 0) >= 2 for k in kws):
+        if any(_same_event(bags[i], b) for b in seen):
             continue          # 补位也不让同一个事件再来一条
-        for k in kws:
-            used[k] = used.get(k, 0) + 1
+        seen.append(bags[i])
         row["why"].append("备选（没有故事相）")
         taken.add(i)
         picked.append(row)
@@ -169,7 +182,8 @@ _XHS_SYSTEM = """你在给一个小红书账号写笔记，素材是当天的热
 6. 全角标点；引号用「」；不要英文引号。
 7. 不许编事实。新闻里没写名字就用不具名说法（「当事女生」「这家店的老板」「一位业主」）；
    绝对不许出现「李强」「赵工」「张阿姨」「王先生」这种自己起的人名，公司名、机构名、
-   数字也只用原文有的。信息不够就把篇幅写短，别硬凑细节。
+   数字也只用原文有的。信息不够就把篇幅写短，别硬凑细节。原文只说「回应」就别写成
+   「调查结果已出」「真相曝光」；没定论的事不要写成已经有定论。
 8. 不要加「网传」「据称」这种免责词；官方通报类照实写。
 9. 最后一句给个有态度的收束，能从前面推出来；放到别的故事上也成立的就是废话，重写。
 
