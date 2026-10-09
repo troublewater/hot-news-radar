@@ -2434,6 +2434,25 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=1200):
     return pool
 
 
+def bangdan_stats(pool):
+    """池子里范文的规模：正文中位字数 / 中位段数 / 每段约多少字。
+
+    「骨架不固定」不等于「不给规模」——只给范文不给长度，模型会写成一地碎片。
+    这几个数是每天从池子里现算的，风向变了它跟着变，不是写死的模板。
+    """
+    txt = [r["text"].strip() for r in (pool or []) if len(r.get("text") or "") >= 120]
+    if not txt:
+        return {}
+
+    def mid(xs):
+        xs = sorted(xs)
+        return xs[len(xs) // 2]
+
+    segs = [max(1, len([x for x in t.split("\n") if x.strip()])) for t in txt]
+    return {"len": mid([len(t) for t in txt]), "segs": mid(segs),
+            "seg_len": mid([len(t) // n for t, n in zip(txt, segs)])}
+
+
 def bangdan_samps(pool, n=3, cap=450):
     """从范文池里挑几篇当范文：曝光高的优先，太短的笑话型学不到骨架。"""
     rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 120),
