@@ -1600,16 +1600,17 @@ _COMMON = {
 
 
 def _name_cands(text):
-    """「姓+1 字」「姓+2 字」的所有候选。
+    """「姓+1 字」「姓+2 字」的候选，只收句子开头那种。
 
-    不要求长在句首——中文就写「爱豆贺峻霖直接拒绝」，要求句首反而漏掉要抓的名字。
-    误判交给两张网：_COMMON 常用词表，以及「后面得跟着动作或称呼」这一条。
+    前面的字也是汉字就跳过：「大家表示」里的「家」、「行李却被」里的「李」、
+    「对方父母」里的「方」、「最后只」里的「后」——全是词的碎片，不是人名。
+    代价是「爱豆贺峻霖」这种夹在词里的漏掉，这个能忍：宁可漏，不能误删。
     """
     out = []
     for m in re.finditer(f"[{_SURNAME}]", text or ""):
         i = m.start()
-        if i and text[i - 1:i + 1] in _COMMON:
-            continue                      # 「公司本来」里的「司」不是姓
+        if i and "\u4e00" <= text[i - 1] <= "\u9fff":
+            continue
         for ln in (2, 3):
             cand = text[i:i + ln]
             if cand[:2] in _COMMON:
