@@ -230,8 +230,8 @@ def _xhs_prompt(picked, fp, samples=None, stats=None):
             "- 跑得动的风格：" + "、".join(gx._bd_named(fp.get("styles", []), 4, skip="其他")),
             f"- 爆款正文中位 {fp.get('len_mid', 0)} 字：短句、短段"]
     if stats:
-        user += [f"- 范文池里的规模：正文中位 {stats['len']} 字、{stats['segs']} 段、"
-                 f"每段约 {stats['seg_len']} 字 —— 照这个规模写，别写成一行一行的碎片"]
+        user += [f"- 范文池里的规模：正文中位 {stats['len']} 字 —— 照这个规模写，"
+                 "别写成一行一行的碎片"]
     if samples:
         user += ["", f"真爆款范文（从累积池里挑的 {len(samples)} 篇，写法照它们来；"
                      "范文里的人、事、数字一个字都不许用）："]
@@ -548,7 +548,7 @@ def main():
     samps = gx.bangdan_samps(pool)
     stats = gx.bangdan_stats(pool)
     print(f"  范文池：累积 {len(pool)} 篇 -> 本轮挑 {len(samps)} 篇当范文"
-          + (f"，规模 中位 {stats['len']} 字 / {stats['segs']} 段" if stats else ""))
+          + (f"，规模中位 {stats['len']} 字" if stats else ""))
     wrote = [] if args.no_ai else xhs_write(picked, fp, samples=samps, stats=stats)
     # 10 条串着抓、每条等 8 秒就是一分多钟；并发只花最长那一条的时间
     with ThreadPoolExecutor(max_workers=5) as pool:
