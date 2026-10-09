@@ -183,43 +183,53 @@ def pick_top(scored, top, keywords):
     return picked
 
 
-_XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。写法是「辣评」：先用事引出话题，再给出自己的角度。
+_XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。**写法不固定**：照附在后面的「真爆款范文」写，
+结构、段数、每段句数、长短、怎么开头、怎么收尾，全部以范文为准。范文池是每天从 X 爆款榜
+累积的，风向变了范文就变，你跟着变——不要套任何固定模板，也不要自己发明一套招式。
 
-口吻（最容易写错的一条）：
-- 你是旁观者，不是当事人。绝对不许写「我最近」「我儿子」「我朋友」这种代入当事人的句子——
-  写成朋友圈口吻就废了。
-- 第一段只把题面写明的事讲一遍，**不许补题面没有的细节**：没写原因的别编原因，没写结果的
-  别编结果，没写态度的别编态度。
-- 接下来 2~3 段才是重点：点评。要刁钻——指出这件事里别人没注意到的利益关系、责任归属、
-  荒诞之处或反常识的细节。
+不许这么写：
+- 不写新闻。禁用语：记者、据报道、相关部门、引发热议、值得深思、有关部门。
+- 不讲大道理。落点换到别的故事上也念得通的，就是废话，重写。
+- 不要问卷式收尾、「你怎么看」这类套话，除非范文就是这么收的。
+- 你不是当事人：绝对不许写「我最近」「我儿子」「我朋友」这种代入当事人的句子，写成朋友圈
+  口吻就废了。范文里出现第一人称是范文的事，你不许跟着用。
+- 不许堆形容词煽情（「太离谱了」「我真的服了」），读完得让人知道到底发生了什么。
 
-其余规矩：
-1. 标题 ≤ 20 字，要有情绪 / 悬念 / 数字，可以带 1~2 个 emoji。
-2. 正文 200~450 字，全口语、短句、多换行；拆成 2~4 段放进 paras，段间自动空一行。
-3. 结尾单独一行给 6~10 个话题标签，纯词，不要 # 号。
-4. 不写新闻稿。禁用语：记者、据报道、相关部门、引发热议、值得深思。
-5. 点评角度必须避开烂大街的解读：「成年人世界没有容易二字」「都是内卷」「原生家庭」
-   「资本」「世态炎凉」「科技是一把双刃剑」这类一律不要，写了等于没写。
-6. 全角标点；引号用「」；不要英文引号。
-7. 不许编事实。题面没写名字就不许起名字，一律用不具名说法（「当事女生」「这家店的老板」
-   「一位业主」）；绝对不许出现「李强」「赵工」「张阿姨」「王先生」这种自己起的人名，
-   公司名、机构名、数字也只用题面有的。信息不够就把篇幅写短，别硬凑细节。题面只说「回应」
-   就别写成「调查结果已出」「真相曝光」；没定论的事不要写成已经有定论。
-8. 不要加「网传」「据称」这种免责词；官方通报类照实写。
-9. 最后一句给个有态度的收束，能从前面推出来；放到别的故事上也成立的就是废话，重写。
+只能这么写：
+- 只把题面已经写明的事展开（补场景、动作、反应），不许新增题面没说的事件。
+- 范文只示范写法：范文里的人、事、数字一个字都不许搬过来。要学得像，就用题面自己的料
+  把那个节奏填满；料不够就写短，别硬凑。
+
+不许编（这条会被程序硬拦，违反的整条作废）：
+- 新闻里没写名字就用不具名说法（「当事女生」「这家店的老板」「一位业主」）；绝不允许出现
+  自己编的人名（「李强」「赵工」「张阿姨」「王先生」这类）。
+- 公司名、机构名、数字同理，只能用原文有的。
+- 题面只说「回应」就别写成「调查结果已出」「真相曝光」；没定论的事不要写成已经有定论。
+
+格式：
+- 标题 <= 20 字，要有情绪 / 悬念 / 数字，可以带 1~2 个 emoji。
+- 正文拆成 3~4 段放进 paras。
+- 结尾单独一行给 6~10 个话题标签，纯词，不要 # 号。
+- 全角标点；引号一律「」；不要英文引号。
 
 只输出 JSON 数组，按输入的编号顺序，不要解释、不要 ``` 包裹：
 [{"i": 1, "title": "标题", "paras": ["第一段", "第二段"], "tags": ["话题1", "话题2"]}]"""
 
 
-def _xhs_prompt(picked, fp):
+def _xhs_prompt(picked, fp, samples=None):
     user = ["今天 X 中文区跑得动的爆款风向（照这个口味写，人和事必须是新的）：",
             "- 跑得动的开头类型：" + "、".join(gx._bd_named(fp.get("hooks", []), 5)),
             "- 跑得动的风格：" + "、".join(gx._bd_named(fp.get("styles", []), 4, skip="其他")),
-            f"- 爆款正文中位 {fp.get('len_mid', 0)} 字：短句、短段",
-            "- 真开头（只学口气和节奏，不许复用里面的人和事）："]
-    user += ["    " + t for t in (fp.get("openers") or [])[:4]]
-    user += ["", "把这些热点各写成一条小红书笔记，一条一个，顺序对应："]
+            f"- 爆款正文中位 {fp.get('len_mid', 0)} 字：短句、短段"]
+    if samples:
+        user += ["", f"真爆款范文（从累积池里挑的 {len(samples)} 篇，写法照它们来；"
+                     "范文里的人、事、数字一个字都不许用）："]
+        for n, smp in enumerate(samples, 1):
+            user += [f"  【范文 {n}】"] + ["    " + ln for ln in smp.split("\n") if ln.strip()]
+    else:
+        user += ["- 真开头（只学口气和节奏，不许复用里面的人和事）："]
+        user += ["    " + t for t in (fp.get("openers") or [])[:4]]
+    user += ["", "把这些热点各写成一条爆款推文，一条一个，顺序对应："]
     for n, row in enumerate(picked, 1):
         it = row["item"]
         user.append(f"{n}. [{it['group']}] {it['title']}"
@@ -278,7 +288,7 @@ def _xhs_parse(text):
     return out
 
 
-def xhs_write(picked, fp, now=None):
+def xhs_write(picked, fp, now=None, samples=None):
     """交给模型写小红书文案。返回 [{i,title,body,tags}]，拿不到就返回空。"""
     key, base, model = gx._ai_config()
     if not key:
@@ -290,7 +300,7 @@ def xhs_write(picked, fp, now=None):
         chunk = picked[k:k + _XHS_BATCH]
         # 每条能拿来核对的「原文」只有热榜标题（原贴正文抓不到），查编造的名字就靠它
         src_of = {k + j + 1: r["item"]["title"] for j, r in enumerate(chunk)}
-        prompt, part = _xhs_prompt(chunk, fp), []
+        prompt, part = _xhs_prompt(chunk, fp, samples), []
         # 模型十次里有几次只交一半（实测 5 条只回 1 条），再要一次基本就补齐了
         for _attempt in (1, 2):
             last = gx._ai_call(key, base, model, _XHS_SYSTEM, prompt)
@@ -512,7 +522,10 @@ def main():
         print(f"  {n:>2}. [{row['score']:>4}] {it['title'][:40]}"
               + (f"   ← {'｜'.join(row['why'])}" if args.explain else ""))
 
-    wrote = [] if args.no_ai else xhs_write(picked, fp)
+    pool = gx._bd_pool(Path(args.out_dir).parent / "x")
+    samps = gx.bangdan_samps(pool)
+    print(f"  范文池：累积 {len(pool)} 篇 -> 本轮挑 {len(samps)} 篇当范文")
+    wrote = [] if args.no_ai else xhs_write(picked, fp, samples=samps)
     # 10 条串着抓、每条等 8 秒就是一分多钟；并发只花最长那一条的时间
     with ThreadPoolExecutor(max_workers=5) as pool:
         for row, pic in zip(picked, pool.map(lambda r: fetch_og_image(r["item"]["url"]), picked)):
