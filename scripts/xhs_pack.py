@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -69,8 +70,13 @@ _FACT_ONLY = re.compile(r"签署|协议|财报|季度|同比|增长|指数|收�
                         r"上线|发布|获批|印发|试点|规划|部署|架构|开源")
 
 
-def score_news(items, fp, keywords):
-    """给每条新闻打分：够不够「爆款相」。分项全部写进 why，方便人一眼看出为什么选它。"""
+def score_news(items, fp, keywords, weights=None):
+    """给每条新闻打分：够不够「爆款相」。分项全部写进 why，方便人一眼看出为什么选它。
+
+    weights = 近 14 天从爆款源学出来的「爆火机制」权重（见 gen_x_card.bangdan_learn）。
+    这一步才是「用爆款的逻辑推测新闻的潜在价值」：机制是同一张表，能同时套在爆款正文
+    和新闻标题上，所以权重可以从一边学到、用在另一边。
+    """
     styles = {s for s in gx._bd_named(fp.get("styles", []), 4, skip="其他")}
     out = []
     for it in items:
@@ -86,6 +92,11 @@ def score_news(items, fp, keywords):
         style = [name for name, pat in _STYLE_HINT if name in styles and re.search(pat, t)]
         sc += 2 * len(style)
         why += [f"贴「{n}」" for n in style]
+        weights = weights or {}
+        mech = [m for m in gx._mech_hits(t) if weights.get(m)]
+        if mech:
+            sc += sum(3 * weights[m] for m in mech)
+            why += [f"爆款逻辑「{m}」" for m in mech]
         hit = sorted([w for w in keywords if w in t], key=len, reverse=True)
         if any(len(w) >= 3 for w in hit):      # 撞上爆款源的高频词算加分，但不是门槛
             sc += 2
@@ -109,7 +120,8 @@ def score_news(items, fp, keywords):
             sc -= 4
             why.append("新闻腔（只能照实写）")
         # 够格入选：至少两个「有故事」的信号，或者一个信号 + 对上今天的风向
-        fit = len(story) >= 2 or bool(story and style)
+        strong = [m for m in mech if weights.get(m, 0) >= 0.5]     # 学出来特别稳的机制
+        fit = len(story) >= 2 or bool(story and (style or strong))
         out.append({"score": round(sc, 1), "why": why, "item": it, "fit": fit})
     out.sort(key=lambda x: -x["score"])
     return out
@@ -448,7 +460,13 @@ def main():
     if not fp.get("n"):
         print("⚠️ 今天没抓到爆款源，筛选只能按通用规则走（不推荐）")
     keywords = [t for t, _ in gx._bd_terms(bang, top=40)]
-    scored = score_news(items, fp, keywords)
+    # 跨天学习：X 卡那步已经把今天这笔写进 docs/x/bangdan_history.json 了，直接读
+    hist = gx._bd_history(Path(args.out_dir).parent / "x")
+    weights = gx.bangdan_learn(hist)
+    if weights:
+        top = sorted(weights.items(), key=lambda kv: -kv[1])[:5]
+        print("  近 14 天学出来的爆火机制：" + "、".join(f"{k} {v:.2f}" for k, v in top))
+    scored = score_news(items, fp, keywords, weights)
     picked = pick_top(scored, args.top, keywords)
     print(f"新闻筛选：{len(items)} 条候选 -> 取 {len(picked)} 条")
     print(f"  今天的高频题材词：{'、'.join(keywords[:10])}")
@@ -458,8 +476,10 @@ def main():
               + (f"   ← {'｜'.join(row['why'])}" if args.explain else ""))
 
     wrote = [] if args.no_ai else xhs_write(picked, fp)
-    for row in picked:
-        row["item"]["orig"] = fetch_og_image(row["item"]["url"])
+    # 10 条串着抓、每条等 8 秒就是一分多钟；并发只花最长那一条的时间
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        for row, pic in zip(picked, pool.map(lambda r: fetch_og_image(r["item"]["url"]), picked)):
+            row["item"]["orig"] = pic
     got = sum(1 for r in picked if r["item"].get("orig"))
     print(f"  原贴配图：{got}/{len(picked)} 条有（热榜链大多是搜索页，没有就不配图）")
     out = Path(args.out_dir)
