@@ -1242,7 +1242,8 @@ def fetch_hot_sources(timeout=45):
     两边各自吞异常，这里不用再兜。
     """
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fb, fs = pool.submit(fetch_bangdan, timeout), pool.submit(fetch_sopilot, timeout)
+        fb = pool.submit(fetch_bangdan, timeout)
+        fs = pool.submit(fetch_sopilot, timeout=timeout)
         bd, sp = fb.result() or [], fs.result() or []
     out = []
     for i in range(max(len(bd), len(sp))):
