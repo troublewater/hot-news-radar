@@ -285,10 +285,11 @@ def xhs_write(picked, fp, now=None):
         print("  ⚠️ 没配 AI key，跳过二创，这轮只出筛选结果和封面")
         return []
     got, last = [], ""
-    src_of = {k + j + 1: r["item"]["title"] for j, r in enumerate(picked)}
     # 分小批写：一次要 10 条长正文容易撞输出上限，也被限流一枪打死整批。
     for k in range(0, len(picked), _XHS_BATCH):
         chunk = picked[k:k + _XHS_BATCH]
+        # 每条能拿来核对的「原文」只有热榜标题（原贴正文抓不到），查编造的名字就靠它
+        src_of = {k + j + 1: r["item"]["title"] for j, r in enumerate(chunk)}
         prompt, part = _xhs_prompt(chunk, fp), []
         # 模型十次里有几次只交一半（实测 5 条只回 1 条），再要一次基本就补齐了
         for _attempt in (1, 2):
