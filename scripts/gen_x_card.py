@@ -1000,6 +1000,9 @@ def _ai_config():
                      or y.get("x_writer_model", "") or y.get("model", "") or _AI_MODEL)
     if model.startswith("openai/"):              # LiteLLM 前缀，直连时要去掉
         model = model.split("/", 1)[1]
+    # 这轮到底用了哪家模型，看日志这一行就够，不用去猜成稿率为什么变
+    print(f"  写作模型：{model} @ {base.split('//')[-1].split('/')[0]}"
+          + ("（专属 key）" if wkey else "（沿用 AI_API_KEY）"))
     return key, base.rstrip("/"), model
 
 
