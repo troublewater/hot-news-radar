@@ -28,6 +28,7 @@ import re
 import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 from datetime import datetime
 from pathlib import Path
 
@@ -46,13 +47,12 @@ _STYLE_HINT = [
     # 「快讯播报」故意不列：通报体是照实写的那种，正是二创写不出东西的题
 ]
 
-# 「写得出爆款吗」——这才是入选门槛。爆款的共同点是：有具体的人、有件具体的事、
-# 有反转或反差、落在一个能引起共鸣的话题上。光热但没法讲的（政策、财报、发布会、
-# 提问帖、工具推荐）一律不选。
+# 「写得出爆款吗」——这才是入选门槛。爆款的共同点是：有件具体的事、有反转或反差、
+# 落在一个能引起共鸣的话题上。光热但没法讲的（政策、财报、发布会、提问帖、工具推荐）
+# 一律不选。
+# 这里**不**把「有没有具体的人」当标准：没有名字的事一样能选，名字由模型编出来的才要拦
+# （见 gen_x_card.invented_names）。
 _STORY = [
-    ("有具体的人", r"男子|女子|大爷|大妈|小伙|姑娘|女孩|男孩|业主|邻居|室友|同事|顾客|"
-                 r"外卖|快递|司机|游客|父亲|母亲|儿子|女儿|夫妻|爷爷|奶奶|老人|孩子|"
-                 r"工人|老师|医生|学生|博主|老板|房东|新娘|新郎|家长"),
     ("有冲突", r"反转|翻车|被坑|被骗|维权|投诉|吐槽|怒|吵|起诉|罚款|赔|抵制|退款|撕|"
              r"举报|纠纷|闹|拦|抢|逃|骗"),
     ("有反差", r"断裂|断了|塌|崩|爆炸|炸裂|离谱|奇葩|罕见|首次|首例|第一次|奇观|魔幻|"
@@ -183,19 +183,28 @@ def pick_top(scored, top, keywords):
     return picked
 
 
-_XHS_SYSTEM = """你在给一个小红书账号写笔记，素材是当天的热点新闻。
+_XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。写法是「辣评」：先用事引出话题，再给出自己的角度。
 
-小红书的规矩（跟推文不一样，别写成推文）：
+口吻（最容易写错的一条）：
+- 你是旁观者，不是当事人。绝对不许写「我最近」「我儿子」「我朋友」这种代入当事人的句子——
+  写成朋友圈口吻就废了。
+- 第一段只把题面写明的事讲一遍，**不许补题面没有的细节**：没写原因的别编原因，没写结果的
+  别编结果，没写态度的别编态度。
+- 接下来 2~3 段才是重点：点评。要刁钻——指出这件事里别人没注意到的利益关系、责任归属、
+  荒诞之处或反常识的细节。
+
+其余规矩：
 1. 标题 ≤ 20 字，要有情绪 / 悬念 / 数字，可以带 1~2 个 emoji。
 2. 正文 200~450 字，全口语、短句、多换行；拆成 2~4 段放进 paras，段间自动空一行。
 3. 结尾单独一行给 6~10 个话题标签，纯词，不要 # 号。
-4. 写故事、写感受，不写新闻稿。禁用语：记者、据报道、相关部门、引发热议、值得深思。
-5. 必须落到具体：一个具体的人、一个具体数字、一次转折。
+4. 不写新闻稿。禁用语：记者、据报道、相关部门、引发热议、值得深思。
+5. 点评角度必须避开烂大街的解读：「成年人世界没有容易二字」「都是内卷」「原生家庭」
+   「资本」「世态炎凉」「科技是一把双刃剑」这类一律不要，写了等于没写。
 6. 全角标点；引号用「」；不要英文引号。
-7. 不许编事实。新闻里没写名字就用不具名说法（「当事女生」「这家店的老板」「一位业主」）；
-   绝对不许出现「李强」「赵工」「张阿姨」「王先生」这种自己起的人名，公司名、机构名、
-   数字也只用原文有的。信息不够就把篇幅写短，别硬凑细节。原文只说「回应」就别写成
-   「调查结果已出」「真相曝光」；没定论的事不要写成已经有定论。
+7. 不许编事实。题面没写名字就不许起名字，一律用不具名说法（「当事女生」「这家店的老板」
+   「一位业主」）；绝对不许出现「李强」「赵工」「张阿姨」「王先生」这种自己起的人名，
+   公司名、机构名、数字也只用题面有的。信息不够就把篇幅写短，别硬凑细节。题面只说「回应」
+   就别写成「调查结果已出」「真相曝光」；没定论的事不要写成已经有定论。
 8. 不要加「网传」「据称」这种免责词；官方通报类照实写。
 9. 最后一句给个有态度的收束，能从前面推出来；放到别的故事上也成立的就是废话，重写。
 
@@ -276,6 +285,7 @@ def xhs_write(picked, fp, now=None):
         print("  ⚠️ 没配 AI key，跳过二创，这轮只出筛选结果和封面")
         return []
     got, last = [], ""
+    src_of = {k + j + 1: r["item"]["title"] for j, r in enumerate(picked)}
     # 分小批写：一次要 10 条长正文容易撞输出上限，也被限流一枪打死整批。
     for k in range(0, len(picked), _XHS_BATCH):
         chunk = picked[k:k + _XHS_BATCH]
@@ -286,8 +296,13 @@ def xhs_write(picked, fp, now=None):
             have = {x["i"] for x in part}
             for x in _xhs_parse(last):
                 x["i"] += k                  # 分批后编号要从整批的序号起算
-                if x["i"] not in have:
-                    part.append(x)
+                if x["i"] in have:
+                    continue
+                bad = gx.invented_names(x["title"] + "\n" + x["body"], src_of.get(x["i"], ""))
+                if bad:                      # 题面里没这个人，是模型自己编的，宁可不要这条
+                    print("     ⚠️ 丢掉一条：里头有原文没写的名字 " + "/".join(bad))
+                    continue
+                part.append(x)
             # 只在「交了一半」时补要一次：整批为空基本是限流/超时，
             # 再要一次等于把 180 秒的等待翻倍（实测能把一个步骤拖到 40 分钟）
             if len(part) >= len(chunk) or not part:
@@ -326,6 +341,12 @@ def fetch_og_image(url, timeout=8):
     return ""
 
 
+def x_intent(title, body=""):
+    """X 的预填发帖链接。正文长过 X 自己的上限时 X 会截，这里不替你删。"""
+    text = f"{title}\n\n{body}" if body else title
+    return "https://x.com/intent/post?text=" + quote(text)
+
+
 def render_pack(picked, wrote, site, handle="", now=None):
     """打包页：封面图 + 标题 + 正文 + 话题，一条一条照抄就能发。"""
     now = now or datetime.now()
@@ -351,6 +372,7 @@ def render_pack(picked, wrote, site, handle="", now=None):
     <h2>{html.escape(title)}</h2>
     <pre class="body">{html.escape(body)}</pre>
     <div class="tags">{html.escape(tagline)}</div>
+    <div class="xpost"><a href="{html.escape(x_intent(title, w.get('body') or ''))}" target="_blank" rel="noreferrer">🐦 一键发 X</a></div>
     <div class="src">原文：<a href="{html.escape(it['url'])}" rel="noreferrer">{html.escape(it['url'][:90])}</a></div>
     <div class="why">{html.escape('｜'.join(row['why']))}</div>
     {nopic}
@@ -373,6 +395,8 @@ def render_pack(picked, wrote, site, handle="", now=None):
  pre.body{{white-space:pre-wrap;font:inherit;line-height:1.9;margin:0 0 14px;color:#dcdce4}}
  .rank{{font-size:13px;color:#9a9aa6}} .sc{{color:#ffd479;margin-left:8px}}
  .tags{{color:#6ec1ff;font-size:14px;margin-bottom:10px}}
+ .xpost{{margin:10px 0 12px}} .xpost a{{display:inline-block;padding:8px 16px;border-radius:999px;
+        background:#1d9bf0;color:#fff;text-decoration:none;font-size:14px;font-weight:600}}
  .src{{font-size:12px;color:#7f7f8c;word-break:break-all;margin-bottom:6px}}
  .why{{font-size:12px;color:#66d9a0}}
  a{{color:#6ec1ff}}
@@ -430,6 +454,16 @@ def selftest():
     assert "原贴没给配图" in page, "没有原图的那条不该配图"
     assert "cov nopic" not in page, "没图的条目不该留空列"
     assert "<script" not in page, "转义没做"
+    # 一键发 X：每条都挂上，且 URL 里的换行/引号都编过码
+    assert page.count("x.com/intent/post") == 2, "两条都该有发帖链接"
+    assert " " not in x_intent("标题", "第一段\n\n第二段").split("text=")[1]
+    assert x_intent("标题") == "https://x.com/intent/post?text=%E6%A0%87%E9%A2%98"
+    # 自编人名：题面没有的名字要拦掉，题面有就放行
+    assert gx.invented_names("李伟在互联网公司上班。李伟后来说，这活儿没法干。", "办卡送话费") \
+        == ["李伟"]
+    assert gx.invented_names("王奶奶把养老钱捂得紧紧的。", "") == ["王奶奶"]
+    # 挑题不再看「有没有具体的人」：没有名字但没有冲突/反差的题不该被这条规则压分
+    assert not any("有具体的人" in w for r in sc for w in r["why"]), "「有具体的人」还在打分"
     got = _xhs_parse('\u0060\u0060\u0060json\n[{"i":1,"title":"标题","paras":["第一段","第二段"],"tags":"#a、b"}]\n\u0060\u0060\u0060')
     assert got and got[0]["body"] == "第一段\n\n第二段" and got[0]["tags"] == ["a", "b"], got
     assert _xhs_parse("模型今天罢工了") == []
@@ -490,8 +524,10 @@ def main():
                                    encoding="utf-8")
     (out / "pack.json").write_text(json.dumps(
         {"date": f"{datetime.now():%Y-%m-%d}", "score": [{"i": n, "score": r["score"],
-         "why": r["why"], "title": r["item"]["title"], "url": r["item"]["url"]}
-         for n, r in enumerate(picked, 1)], "notes": wrote}, ensure_ascii=False, indent=1),
+         "why": r["why"], "title": r["item"]["title"], "url": r["item"]["url"],
+         "x": x_intent(r["item"]["title"])} for n, r in enumerate(picked, 1)],
+         "notes": [dict(x, x_intent=x_intent(x["title"], x["body"])) for x in wrote]},
+        ensure_ascii=False, indent=1),
         encoding="utf-8")
     print(f"图文包：{out/'pack.html'}")
     # 没出正文也照推：不然你那边一整天静悄悄，还以为是流水线挂了
