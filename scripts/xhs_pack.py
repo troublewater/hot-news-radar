@@ -190,7 +190,7 @@ _XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。**写法不�
 不许这么写：
 - 不写新闻。禁用语：记者、据报道、相关部门、引发热议、值得深思、有关部门。
 - 不讲大道理。落点换到别的故事上也念得通的，就是废话，重写。
-- 不要问卷式收尾、「你怎么看」这类套话，除非范文就是这么收的。
+- 不要问卷式收尾：「你怎么看」「你怎么评价」「说说你的想法」一律不要，不管范文怎么收。
 - 你不是当事人：绝对不许写「我最近」「我儿子」「我朋友」这种代入当事人的句子，写成朋友圈
   口吻就废了。范文里出现第一人称是范文的事，你不许跟着用。
 - 不许堆形容词煽情（「太离谱了」「我真的服了」），读完得让人知道到底发生了什么。
@@ -208,7 +208,7 @@ _XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。**写法不�
 
 格式：
 - 标题 <= 20 字，要有情绪 / 悬念 / 数字，可以带 1~2 个 emoji。
-- 正文拆成 3~4 段放进 paras。
+- 正文拆成 3~4 段放进 paras；篇幅照提示里给的「范文池规模」写，没给就 200~350 字。
 - 结尾单独一行给 6~10 个话题标签，纯词，不要 # 号。
 - 全角标点；引号一律「」；不要英文引号。
 
@@ -216,11 +216,14 @@ _XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。**写法不�
 [{"i": 1, "title": "标题", "paras": ["第一段", "第二段"], "tags": ["话题1", "话题2"]}]"""
 
 
-def _xhs_prompt(picked, fp, samples=None):
+def _xhs_prompt(picked, fp, samples=None, stats=None):
     user = ["今天 X 中文区跑得动的爆款风向（照这个口味写，人和事必须是新的）：",
             "- 跑得动的开头类型：" + "、".join(gx._bd_named(fp.get("hooks", []), 5)),
             "- 跑得动的风格：" + "、".join(gx._bd_named(fp.get("styles", []), 4, skip="其他")),
             f"- 爆款正文中位 {fp.get('len_mid', 0)} 字：短句、短段"]
+    if stats:
+        user += [f"- 范文池里的规模：正文中位 {stats['len']} 字、{stats['segs']} 段、"
+                 f"每段约 {stats['seg_len']} 字 —— 照这个规模写，别写成一行一行的碎片"]
     if samples:
         user += ["", f"真爆款范文（从累积池里挑的 {len(samples)} 篇，写法照它们来；"
                      "范文里的人、事、数字一个字都不许用）："]
@@ -288,7 +291,7 @@ def _xhs_parse(text):
     return out
 
 
-def xhs_write(picked, fp, now=None, samples=None):
+def xhs_write(picked, fp, now=None, samples=None, stats=None):
     """交给模型写小红书文案。返回 [{i,title,body,tags}]，拿不到就返回空。"""
     key, base, model = gx._ai_config()
     if not key:
@@ -300,7 +303,7 @@ def xhs_write(picked, fp, now=None, samples=None):
         chunk = picked[k:k + _XHS_BATCH]
         # 每条能拿来核对的「原文」只有热榜标题（原贴正文抓不到），查编造的名字就靠它
         src_of = {k + j + 1: r["item"]["title"] for j, r in enumerate(chunk)}
-        prompt, part = _xhs_prompt(chunk, fp, samples), []
+        prompt, part = _xhs_prompt(chunk, fp, samples, stats), []
         # 模型十次里有几次只交一半（实测 5 条只回 1 条），再要一次基本就补齐了
         for _attempt in (1, 2):
             last = gx._ai_call(key, base, model, _XHS_SYSTEM, prompt)
@@ -524,8 +527,10 @@ def main():
 
     pool = gx._bd_pool(Path(args.out_dir).parent / "x")
     samps = gx.bangdan_samps(pool)
-    print(f"  范文池：累积 {len(pool)} 篇 -> 本轮挑 {len(samps)} 篇当范文")
-    wrote = [] if args.no_ai else xhs_write(picked, fp, samples=samps)
+    stats = gx.bangdan_stats(pool)
+    print(f"  范文池：累积 {len(pool)} 篇 -> 本轮挑 {len(samps)} 篇当范文"
+          + (f"，规模 中位 {stats['len']} 字 / {stats['segs']} 段" if stats else ""))
+    wrote = [] if args.no_ai else xhs_write(picked, fp, samples=samps, stats=stats)
     # 10 条串着抓、每条等 8 秒就是一分多钟；并发只花最长那一条的时间
     with ThreadPoolExecutor(max_workers=5) as pool:
         for row, pic in zip(picked, pool.map(lambda r: fetch_og_image(r["item"]["url"]), picked)):
