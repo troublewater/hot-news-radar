@@ -35,6 +35,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -541,31 +542,46 @@ def fetch_article(url, chars=_ARTICLE_CHARS):
     return _cut_sentences(_drop_ad_lead(_drop_lead_dialogue(_strip_article_head(body))), chars)
 
 
+_FETCH_WORKERS = 6        # 小池子：够快，又不至于把搜狗/微信惹毛
+
+
+def _one_fulltext(st, chars):
+    """一条素材换原文。换不到返回 None。"""
+    real = _wechat_url(st["url"])
+    if not real:                               # 连着换十几次地址会被限流，歇一下再来一遍
+        time.sleep(3)
+        real = _wechat_url(st["url"])
+    body = fetch_article(real, chars) if real else ""
+    if not body:
+        return None                            # 摘要版读不通，不要
+    st["desc"] = body
+    st["url"] = real                           # 换成正主地址，搜狗那个跳转是有时效的
+    return st
+
+
 def enrich_fulltext(stories, chars=_ARTICLE_CHARS):
     """把公众号素材换成原文正文；换不到原文的整条丢掉。
 
     搜狗只给一百来字的摘要，还从半句中间切。拿它当发帖素材就是「掐头去尾」，
     后半句接上钩子根本读不通。宁肯少几条，也不发半截话。
+
+    并发做：38 条串着来、每条都在等超时，实测吃掉 13 分钟；并发之后几十秒。
     """
-    got, kept = 0, []
-    for st in stories:
-        if st.get("src") != "公众号" or not st.get("url"):
-            kept.append(st)
-            continue
-        real = _wechat_url(st["url"])
-        if not real:                               # 连着换十几次地址会被限流，歇一下再来一遍
-            time.sleep(3)
-            real = _wechat_url(st["url"])
-        body = fetch_article(real, chars) if real else ""
-        if not body:
-            continue                               # 摘要版读不通，不要
-        st["desc"] = body
-        st["url"] = real                           # 换成正主地址，搜狗那个跳转是有时效的
-        kept.append(st)
-        got += 1
-        time.sleep(0.6)                            # 连着换地址容易被限流，间隔别抠
+    todo, out = [], [None] * len(stories)
+    for i, st in enumerate(stories):
+        if st.get("src") == "公众号" and st.get("url"):
+            todo.append((i, st))
+        else:
+            out[i] = st
+    got = 0
+    if todo:
+        with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as pool:
+            for (i, _), res in zip(todo, pool.map(lambda p: _one_fulltext(p[1], chars), todo)):
+                if res is not None:
+                    out[i] = res
+                    got += 1
     print(f"  正文补全：{got}/{len(stories)} 条拿到原文，其余丢弃")
-    return kept
+    return [x for x in out if x]
 
 
 def fetch_stories(keywords=None, now=None, limit=12, per_keyword=6):
@@ -724,7 +740,18 @@ def fetch_tieba(limit=3):
 
 def collect_stories(top):
     """汇总三个源并按题材去重。交错着取，免得一个源把另一个挤没。"""
-    groups = [fetch_stories(limit=20), fetch_hupu(limit=20, probe=36), fetch_tieba(limit=6)]
+    # 三个源互不相干，串行等于把三家的等待时间加起来
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futs = [pool.submit(fn, **kw) for fn, kw in (
+            (fetch_stories, {"limit": 20}), (fetch_hupu, {"limit": 20, "probe": 36}),
+            (fetch_tieba, {"limit": 6}))]
+        groups = []
+        for f in futs:
+            try:
+                groups.append(f.result() or [])
+            except Exception as exc:        # noqa: BLE001 - 一个源挂了还有别的
+                print(f"  ⚠️ 素材源失败：{type(exc).__name__}: {exc}")
+                groups.append([])
     pool = []
     for i in range(max((len(x) for x in groups), default=0)):
         pool += [x[i] for x in groups if i < len(x)]
@@ -1123,6 +1150,27 @@ _BD_STYLES = [
 ]
 
 
+# 爆款「为什么火」的机制。同一张表必须能同时套在爆款正文和新闻标题上——
+# 两边用同一把尺子，才有可能拿爆款的逻辑去量新闻的潜力。
+# 靠人工写死规则只能到这一步；真正决定权重的是 bangdan_learn()：每天从累计的
+# 爆款源里重算一遍，哪个机制这段时间既稳定出现又真能带量，它就自动变重要。
+_MECHANISMS = [
+    ("反差反转", r"结果|没想到|反而|竟然|居然|本来.{0,10}(却|结果)|反转|翻车|打脸|说好的"),
+    ("共鸣代入", r"我也|我家|我家那|身边|朋友|同事|你们|是不是|有没有|懂的都懂|谁不"),
+    ("争议对立", r"争议|凭什么|该不该|吵|怼|骂|反对|支持|两极|站队|不配"),
+    ("好奇猎奇", r"罕见|第一次|首次|奇观|离谱|魔幻|惊|真相|居然|竟然|最.{0,6}的"),
+    ("金钱账本", r"\d+\s*[万块元亿]|[0-9]+万|花[了掉]|赔|赚|亏|彩礼|工资|存款|房价"),
+    ("身份反差", r"\d+岁|[A-Z]\d{1,2}|大哥|大爷|大妈|老板|局长|医生|老师|博士|清华|北大|月薪"),
+    ("时间紧迫", r"当天|当晚|最后一|一晚上|三分钟|立刻|马上|刚刚|才.{0,6}就"),
+    ("人情冲突", r"婆婆|丈母娘|亲戚|邻居|同事|闺蜜|兄弟|分手|离婚|彩礼|份子钱|彩礼钱"),
+]
+
+
+def _mech_hits(text):
+    """这段文字用了哪些爆火机制。"""
+    return [name for name, pat in _MECHANISMS if re.search(pat, text or "")]
+
+
 def fetch_bangdan(timeout=45):
     """抓 X 中文区当日爆款。返回 [{handle,name,text,v,r,l,age,cat}]，失败返回 []。"""
     try:
@@ -1188,9 +1236,14 @@ def fetch_sopilot(ranges=("24h", "yesterday"), timeout=45):
 
 def fetch_hot_sources(timeout=45):
     """两个爆款源交错合并。交错很关键：fingerprint 只采样前 60 条，
-    直接拼接的话后一个源一条都轮不上。"""
-    bd = fetch_bangdan(timeout=timeout)
-    sp = fetch_sopilot(timeout=timeout)
+    直接拼接的话后一个源一条都轮不上。
+
+    两个源互相独立，串行就是白等一家的超时（实测光这一步 4 分钟），并发拉。
+    两边各自吞异常，这里不用再兜。
+    """
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fb, fs = pool.submit(fetch_bangdan, timeout), pool.submit(fetch_sopilot, timeout)
+        bd, sp = fb.result() or [], fs.result() or []
     out = []
     for i in range(max(len(bd), len(sp))):
         if i < len(bd):
@@ -1220,9 +1273,15 @@ def bangdan_fingerprint(rows, sample=60):
         hooks[_bd_first(r["text"], _BD_HOOKS) or "无钩子"] += 1
         styles[_bd_first(r["text"], _BD_STYLES) or "其他"] += 1
         cats[r.get("cat") or "none"] += 1
+    mech, mexp = Counter(), Counter()
+    for r in rows:
+        for name in _mech_hits(r["text"]):
+            mech[name] += 1
+            mexp[name] += r["v"]        # SoPilot 那批 v=0，只当出现次数，不加曝光
     lens = sorted(len(r["text"]) for r in rows) or [0]
     return {"n": len(rows), "hooks": hooks.most_common(), "styles": styles.most_common(),
             "cats": cats.most_common(), "len_mid": lens[len(lens) // 2],
+            "mech": mech.most_common(), "exp": mexp.most_common(),
             "openers": [r["text"][:40].replace("\n", " ") for r in rows[:6]],
             "tops": [r for r in rows if r["v"] > 0][:5]}   # SoPilot 那批没曝光数，不进对标榜
 
@@ -2127,13 +2186,21 @@ def _bd_history(out_dir):
 
 
 def _bd_save_history(out_dir, hist, fp, terms, now=None):
-    """把今天这笔追加进去，只留最近 30 天。hist 原地增长，调用方接着拿它渲染。"""
+    """把今天这笔写进去，同一天只留最新一条。hist 原地更新，调用方接着拿它渲染。
+
+    一天要跑几十轮，按轮次追加的话 30 条记录连一天都盖不住，「近 N 天」实际是
+    「近 N 轮」——跨天学习就成了看最近几次运行，白学。
+    """
     now = now or datetime.now()
-    hist.append({"d": f"{now:%Y-%m-%d}", "n": fp["n"], "mid": fp["len_mid"],
+    day = f"{now:%Y-%m-%d}"
+    hist[:] = [h for h in hist if h.get("d") != day]
+    hist.append({"d": day, "n": fp["n"], "mid": fp["len_mid"],
                  "hooks": fp["hooks"][:8], "styles": fp["styles"][:6],
+                 "mech": (fp.get("mech") or [])[:8], "exp": (fp.get("exp") or [])[:8],
                  "terms": terms or []})
+    del hist[:-_BD_HIST_DAYS]
     (Path(out_dir) / _BD_HIST_FILE).write_text(
-        json.dumps(hist[-_BD_HIST_DAYS:], ensure_ascii=False), encoding="utf-8")
+        json.dumps(hist, ensure_ascii=False), encoding="utf-8")
 
 
 _AUTO_RE = re.compile(
@@ -2144,6 +2211,32 @@ def _splice_auto(text, body):
     """把「今日爆款风向」塞进 hooksupdate.md 的 AUTO:BANGDAN 区块（站点那份每天刷新）。"""
     return _AUTO_RE.sub(lambda m: m.group(1) + "\n" + body.strip() + "\n" + m.group(3),
                         text, count=1)
+
+
+def bangdan_learn(hist, days=14):
+    """从跨天的爆款源里学「哪套机制现在跑得动」——这就是每天自我更迭的那部分。
+
+    单天样本会骗人（今天尽是彩礼，不代表彩礼一直行），所以看近 N 天的累计：
+    出现天数多 = 稳定有效；累计曝光高 = 真能带量。两者合成权重，筛新闻时按这个打分。
+    权重每次运行都重算，机制名单一变、样本一变，结果就跟着变，不需要人去改代码。
+    """
+    day_hit, exp_sum = Counter(), Counter()
+    for day in hist[-days:]:
+        for name, n in day.get("mech") or []:
+            if n >= 2:                     # 当天只露一次的不算，噪声
+                day_hit[name] += 1
+        for name, v in day.get("exp") or []:
+            exp_sum[name] += v
+    names = set(day_hit) | set(exp_sum)
+    if not names:
+        return {}
+    def norm(d):
+        top = max(d.values()) or 1
+        return {k: v / top for k, v in d.items()}
+    nd, ne = norm(day_hit), norm(exp_sum)
+    # 只有一天样本时「出现天数」完全没区分度（出现的都是 1），把重量压到曝光上
+    wd = 0.6 if len({d.get("d") for d in hist[-days:] if d.get("mech")}) >= 2 else 0.2
+    return {n: round(wd * nd.get(n, 0) + (1 - wd) * ne.get(n, 0), 3) for n in names}
 
 
 def _bd_days(hist, key, skip, need=2):
@@ -2162,6 +2255,7 @@ def render_bangdan_auto(fp, terms, hist, now=None):
     now = now or datetime.now()
     if not fp.get("n"):
         return "（今天没抓到爆款源，这一块保持上一次的内容，不影响出稿。）"
+    w = bangdan_learn(hist)
     out = [f"**{now:%Y-%m-%d}** —— X 上今天跑得动的是 "
            f"{'、'.join(_bd_named(fp['hooks'], 4)) or '没量出明显套路'} 这类开头，"
            f"爆款正文中位 {fp['len_mid']} 字。今天优先用这几个钩子。", "",
@@ -2175,6 +2269,10 @@ def render_bangdan_auto(fp, terms, hist, now=None):
     if days > 1 and sc:
         out += [f"近 {days} 天反复跑得动的风格："
                 + "、".join(f"{k} {v}/{days} 天" for k, v in sc.most_common(4))]
+    if w:
+        top = sorted(w.items(), key=lambda kv: -kv[1])[:5]
+        out += ["", "近 14 天学出来的爆火机制权重（筛选新闻就按这个排，每天重算）："
+                    + "、".join(f"{k} {v:.2f}" for k, v in top)]
     if terms:
         out += ["今天爆款里的高频题材词（想加就加进 config/frequency_words.txt）："
                 + "  ".join(f"{g}({c})" for g, c in terms[:8])]
