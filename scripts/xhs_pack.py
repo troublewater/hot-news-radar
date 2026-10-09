@@ -99,8 +99,7 @@ def score_news(items, fp, keywords, weights=None, types=None):
             sc += sum(3 * weights[m] for m in mech)
             why += [f"爆款逻辑「{m}」" for m in mech]
         # 撞上范文池总结出来的内容类型：题材对上了，就是「这类爆款在讲的事」
-        ty = [k["name"] for k in (types or [])
-              if any(s and s in t for s in (k.get("sign") or []))]
+        ty = gx.match_types(t, types)
         if ty:
             sc += 3 * len(ty)
             why += [f"类型「{n}」" for n in ty]
@@ -224,26 +223,20 @@ _XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。**写法不�
 [{"i": 1, "title": "标题", "paras": ["第一段", "第二段"], "tags": ["话题1", "话题2"]}]"""
 
 
-def _xhs_prompt(picked, fp, samples=None, stats=None):
+def _xhs_prompt(picked, fp, types=None, stats=None):
     user = ["今天 X 中文区跑得动的爆款风向（照这个口味写，人和事必须是新的）：",
             "- 跑得动的开头类型：" + "、".join(gx._bd_named(fp.get("hooks", []), 5)),
             "- 跑得动的风格：" + "、".join(gx._bd_named(fp.get("styles", []), 4, skip="其他")),
             f"- 爆款正文中位 {fp.get('len_mid', 0)} 字：短句、短段"]
+    if types:
+        user += ["", "今天从范文池总结出来的内容类型（写法照对应那一条，别自己发明招式）："]
+        user += [f"- {t['name']}：{t.get('desc', '')}｜写法：{t.get('how', '')}"
+                 for t in types[:10]]
     if stats:
-        user += [f"- 范文池里的规模：正文中位 {stats['len']} 字 —— 照这个规模写，"
-                 "别写成一行一行的碎片"]
-    if samples:
-        user += ["", f"真爆款范文（从累积池里挑的 {len(samples)} 篇，写法照它们来；"
-                     "范文里的人、事、数字一个字都不许用）："]
-        for n, smp in enumerate(samples, 1):
-            user += [f"  【范文 {n}】"] + ["    " + ln for ln in smp.split("\n") if ln.strip()]
-    else:
-        user += ["- 真开头（只学口气和节奏，不许复用里面的人和事）："]
-        user += ["    " + t for t in (fp.get("openers") or [])[:4]]
+        user += ["", f"- 正文规模按 {stats['len']} 字上下写，别写成一行一行的碎片"]
     user += ["", "把这些热点各写成一条爆款推文，一条一个，顺序对应："]
     for n, row in enumerate(picked, 1):
         it = row["item"]
-        # 把匹配到的爆款类型一起告诉模型：这条该按哪一类写
         tname = f"，爆款类型：{row['type']}" if row.get("type") else ""
         user.append(f"{n}. [{it['group']}] {it['title']}"
                     f"（{'/'.join(it['platforms'])} 第{it['rank']}位{tname}）")
@@ -301,7 +294,7 @@ def _xhs_parse(text):
     return out
 
 
-def xhs_write(picked, fp, now=None, samples=None, stats=None):
+def xhs_write(picked, fp, now=None, types=None, stats=None):
     """交给模型写小红书文案。返回 [{i,title,body,tags}]，拿不到就返回空。"""
     key, base, model = gx._ai_config()
     if not key:
@@ -313,7 +306,7 @@ def xhs_write(picked, fp, now=None, samples=None, stats=None):
         chunk = picked[k:k + _XHS_BATCH]
         # 每条能拿来核对的「原文」只有热榜标题（原贴正文抓不到），查编造的名字就靠它
         src_of = {k + j + 1: r["item"]["title"] for j, r in enumerate(chunk)}
-        prompt, part = _xhs_prompt(chunk, fp, samples, stats), []
+        prompt, part = _xhs_prompt(chunk, fp, types, stats), []
         # 模型十次里有几次只交一半（实测 5 条只回 1 条），再要一次基本就补齐了
         for _attempt in (1, 2):
             last = gx._ai_call(key, base, model, _XHS_SYSTEM, prompt)
@@ -528,13 +521,14 @@ def main():
     # 跨天学习：X 卡那步已经把今天这笔写进 docs/x/bangdan_history.json 了，直接读
     hist = gx._bd_history(Path(args.out_dir).parent / "x")
     weights = gx.bangdan_learn(hist)
-    if weights:
-        top = sorted(weights.items(), key=lambda kv: -kv[1])[:5]
-        print("  近 14 天学出来的爆火机制：" + "、".join(f"{k} {v:.2f}" for k, v in top))
+    # 当天从范文池总结出来的内容类型：挑新闻和写作都用它（gen_x_card 那步已经写好）
     types = gx.load_types(Path(args.out_dir).parent / "x")
     if types:
         print(f"  内容类型 {len(types)} 类："
               + "、".join(t["name"] for t in types[:6]))
+    if weights:
+        top = sorted(weights.items(), key=lambda kv: -kv[1])[:5]
+        print("  近 14 天学出来的爆火机制：" + "、".join(f"{k} {v:.2f}" for k, v in top))
     scored = score_news(items, fp, keywords, weights, types)
     picked = pick_top(scored, args.top, keywords)
     print(f"新闻筛选：{len(items)} 条候选 -> 取 {len(picked)} 条")
@@ -545,11 +539,11 @@ def main():
               + (f"   ← {'｜'.join(row['why'])}" if args.explain else ""))
 
     pool = gx._bd_pool(Path(args.out_dir).parent / "x")
-    samps = gx.bangdan_samps(pool)
     stats = gx.bangdan_stats(pool)
-    print(f"  范文池：累积 {len(pool)} 篇 -> 本轮挑 {len(samps)} 篇当范文"
-          + (f"，规模中位 {stats['len']} 字" if stats else ""))
-    wrote = [] if args.no_ai else xhs_write(picked, fp, samples=samps, stats=stats)
+    print(f"  范文池累积 {len(pool)} 篇"
+          + (f"，规模中位 {stats['len']} 字" if stats else "")
+          + f"；按 {len(types)} 类内容类型匹配")
+    wrote = [] if args.no_ai else xhs_write(picked, fp, types=types, stats=stats)
     # 10 条串着抓、每条等 8 秒就是一分多钟；并发只花最长那一条的时间
     with ThreadPoolExecutor(max_workers=5) as pool:
         for row, pic in zip(picked, pool.map(lambda r: fetch_og_image(r["item"]["url"]), picked)):
