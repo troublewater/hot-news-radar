@@ -2200,6 +2200,19 @@ def main():
         assert len(set(picks0)) == 12 and len(_WRITER_HOOKS) >= 15, picks0
         copy2 = render_copy(items, "https://example.com", now=datetime(2026, 9, 30, 8, 0))
         assert copy != copy2, "不同日期文案完全一样，等于没做变化"
+        # 范文池：同一天同一篇只留一份，太短的丢掉，超出保留天数的挤出去
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            got = _bd_pool_add(td, [{"text": "长" * 200, "v": 3, "cat": "a"},
+                                    {"text": "长" * 200, "v": 9, "cat": "a"},
+                                    {"text": "太短", "v": 1, "cat": "a"}])
+            assert len(got) == 1, got
+            assert bangdan_samps(got), "池子里挑不出范文"
+            (Path(td) / _BD_POOL_FILE).write_text(json.dumps(
+                [{"d": f"2000-01-{d:02d}", "v": 1, "cat": "", "text": "旧" * 200}
+                 for d in range(1, 16)]), encoding="utf-8")
+            left = _bd_pool_add(td, [])
+            assert len(left) == 14 and all(r["d"] != "2000-01-01" for r in left), left
         print(f"selftest OK — {len(items)} 条，首条：{items[0]['title'][:26]} "
               f"{items[0]['platforms']} 第{items[0]['rank']}位 "
               f"{items[0]['trend'] or '-'} {items[0]['count'] or '-'}")
@@ -2232,13 +2245,15 @@ def main():
     hist = _bd_history(out)
     if fp["n"]:
         _bd_save_history(out, hist, fp, terms)
+    # 范文池：每天的爆款原文攒进去，跨天去重、只留最近 N 天。写作时从池子里取材。
+    pool = _bd_pool_add(out, bang)
     # 二创规范（hooksupdate.md）也复制一份到站点：豆包那边读同一个 URL，两边就同一份。
     # 站点那份额外把「今日爆款风向」刷成今天的，豆包不用再去翻 bangdan.md。
     memo = Path(__file__).resolve().parent.parent / "hooksupdate.md"
     if memo.is_file():
         (out / "hooksupdate.md").write_text(
             _splice_auto(memo.read_text(encoding="utf-8", errors="ignore"),
-                        render_bangdan_auto(fp, terms, hist)), encoding="utf-8")
+                        render_bangdan_auto(fp, terms, hist, pool=pool)), encoding="utf-8")
     # collect_stories 里已经补过正文（换不到原文的已丢掉），这里不用再补一次。
     # 板块二优先走 AI 改编：抓来的原贴读起来断章取义（摘要 + 几个热评拼在一起），
     # 用户要的是「热搜话题 -> 有人有事的小故事」。改写失败就退回原贴，不开天窗。
@@ -2361,7 +2376,67 @@ def _bd_days(hist, key, skip, need=2):
     return cnt, len(week)
 
 
-def render_bangdan_auto(fp, terms, hist, now=None):
+_BD_POOL_FILE = "bangdan_pool.json"      # 范文池，落在 docs/x/ 下跟着 reports 分支走
+_BD_POOL_DAYS = 14
+
+
+def _bd_pool(out_dir):
+    """读范文池：累积的爆款原文，跨天去重。读不到就是第一次跑。"""
+    try:
+        data = json.loads((Path(out_dir) / _BD_POOL_FILE).read_text(
+            encoding="utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [r for r in data if isinstance(r, dict) and r.get("text")]
+
+
+def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=1200):
+    """把今天抓到的爆款原文并进范文池，返回合并后的池子。
+
+    和 bangdan_history.json 分工不同：history 每天只存统计（哪个钩子各多少条），
+    池子存原文——写作要拿整篇当范文，统计数字顶不了这个用。所以写法是「攒出来的」：
+    池子越厚，可挑的范文越好，不是每天从零重算。
+    """
+    now = now or datetime.now()
+    day = f"{now:%Y-%m-%d}"
+    pool = _bd_pool(out_dir)
+    seen = {r["text"][:80] for r in pool}
+    for r in bang or []:
+        t = re.sub(r"\n{2,}", "\n", (r.get("text") or "").strip())
+        if len(t) < 60:                      # 单句 / 转发型短帖学不到写法
+            continue
+        if t[:80] in seen:
+            continue
+        seen.add(t[:80])
+        pool.append({"d": day, "v": r.get("v") or 0, "cat": r.get("cat") or "",
+                     "text": t[:cap]})
+    keep = sorted({r["d"] for r in pool})[-_BD_POOL_DAYS:]
+    pool = [r for r in pool if r["d"] in keep]
+    if len(pool) > max_n:                    # 只留曝光高的，池子不能无限长
+        pool = sorted(pool, key=lambda r: -(r.get("v") or 0))[:max_n]
+    (Path(out_dir) / _BD_POOL_FILE).write_text(
+        json.dumps(pool, ensure_ascii=False), encoding="utf-8")
+    return pool
+
+
+def bangdan_samps(pool, n=3, cap=450):
+    """从范文池里挑几篇当范文：曝光高的优先，太短的笑话型学不到骨架。"""
+    rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 120),
+                  key=lambda r: -(r.get("v") or 0))
+    out = []
+    for r in rows:
+        t = r["text"].strip()
+        if any(t[:60] == o[:60] for o in out):
+            continue
+        out.append(t[:cap])
+        if len(out) >= n:
+            break
+    return out
+
+
+def render_bangdan_auto(fp, terms, hist, now=None, pool=None):
     """hooksupdate.md 里「今日爆款风向」那一块：今天什么样 + 近 7 天一直什么样。"""
     now = now or datetime.now()
     if not fp.get("n"):
@@ -2387,6 +2462,9 @@ def render_bangdan_auto(fp, terms, hist, now=None):
     if terms:
         out += ["今天爆款里的高频题材词（想加就加进 config/frequency_words.txt）："
                 + "  ".join(f"{g}({c})" for g, c in terms[:8])]
+    if pool:
+        out += ["", f"范文池：已累积 {len({r['d'] for r in pool})} 天 / {len(pool)} 篇真爆款——"
+                    "写作用的就是从这里挑的范文，池子每天往里加，写法跟着池子一起长。"]
     return "\n".join(out)
 
 
