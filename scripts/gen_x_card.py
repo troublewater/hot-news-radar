@@ -1066,21 +1066,26 @@ def _hot_topic(title, boost, floor=3):
     return max(hits)[::-1] if hits else ("", 0)
 
 
-def _hook_topics(items, limit, bang=None):
+def _hook_topics(items, limit, bang=None, types=None):
     """今天哪几个母题在发酵：返回 [(母题, [今天的风向标题...])]。
 
     给模型的不是「照这个标题写」，而是「这个方向今天有人在聊」，免得写成新闻复述。
     bang 是爆款源样本（fetch_bangdan 的结果），可以不给。
     """
     groups = _load_topic_words()
-    hits = {}
+    hits, thits = {}, {}
     for it in items:
         t = it["title"].strip()
         if not t or len(t) > 42 or _NEWSY_TITLE.search(t) or _STORY_NOISE_TITLE.search(t):
             continue
+        # 这条撞上范文池总结出来的哪几类内容类型——这就是「用爆款的口味挑新闻」
+        tn = match_types(t, types)
         for g, words in groups.items():
             if any(w in t for w in words):
                 hits.setdefault(g, []).append((len(it["platforms"]), t))
+                if tn:
+                    thits.setdefault(g, [])
+                    thits[g] += [x for x in tn if x not in thits[g]]
     # 爆款源反向加权：哪几类题材今天在 X 上正跑得动，对应母题就往前排。
     # 这是「爆款源 → 新闻源」那一半闭环：选题方向跟着爆款风向走，不是拍脑袋。
     boost = _bang_boost(bang)
@@ -1088,11 +1093,12 @@ def _hook_topics(items, limit, bang=None):
     # 权重是拍的：爆款一天上百条、热搜一个母题撑死几条，不放大完全主导不了排序。
     def rank(kv):
         g, rows = kv
-        return (-(min(boost.get(g, 0), 20) * 3 + len(rows) * 4), g)
+        return (-(min(boost.get(g, 0), 20) * 3 + len(rows) * 4
+                  + min(len(thits.get(g, [])), 12) * 3), g)
 
     for g, rows in sorted(hits.items(), key=rank):
         rows = sorted(set(rows), reverse=True)[:2]
-        out.append((g, [t for _, t in rows]))
+        out.append((g, [t for _, t in rows], thits.get(g, [])))
     return out[:limit]
 
 
@@ -1662,13 +1668,13 @@ def _drop_invented(x, src):
     return bad
 
 
-def ai_write_stories(items, seeds, top, now=None, bang=None):
+def ai_write_stories(items, seeds, top, now=None, bang=None, types=None):
     """把当天热搜话题交给模型，写成能单条发的隔断式故事。拿不到就返回空列表。"""
     key, base, model = _ai_config()
     if not key:
         print("  ⚠️ 没配 AI_API_KEY，跳过改写，退回抓来的原贴")
         return []
-    topics = _hook_topics(items, min(40, max(16, top * 2)), bang=bang)
+    topics = _hook_topics(items, min(40, max(16, top * 2)), bang=bang, types=types)
     if not topics:
         return []
     fp = bangdan_fingerprint(bang) if bang else {}
@@ -1688,10 +1694,16 @@ def ai_write_stories(items, seeds, top, now=None, bang=None):
             "今天的风向（母题 + 今天相关的热搜标题）。标题只说明这个方向今天有人在聊，"
             "不要复述它，也别出现里面的机构名、产品名、政策名，写这一类的普通人故事：",
         ]
-        for n, (group, winds) in enumerate(batch, 1):
-            user.append(f"{n}. {group}：" + "；".join(winds))
+        if types:
+            user += ["", "今天从范文池总结出来的内容类型（这条落在哪类里，就照那类的写法写）："]
+            user += [f"- {t['name']}：{t.get('desc', '')}｜写法：{t.get('how', '')}"
+                     for t in types[:10]]
+            user += [""]
+        for n, (group, winds, tnames) in enumerate(batch, 1):
+            tn = ("｜爆款类型：" + "、".join(tnames)) if tnames else ""
+            user.append(f"{n}. {group}{tn}：" + "；".join(winds))
         # 判「是不是原文里的名字」只能用母题 + 素材：范文里的人正是明令禁止复用的
-        src = " ".join([g for g, _ in batch] + [w for _, ws in batch for w in ws]
+        src = " ".join([g for g, _, _ in batch] + [w for _, ws, _ in batch for w in ws]
                        + [s["标题"] + s["正文"] for s in seeds])
         if seeds and start == 0:
             # 只在第一批给素材：每批都给的话，模型会拿同一条素材写出好几篇一样的
@@ -2088,9 +2100,9 @@ def main():
                {"title": "彩礼谈崩了", "platforms": ["微博"], "rank": 5},
                {"title": "Mate90 系列新品发布会", "platforms": ["微博"], "rank": 1}]
         tops = _hook_topics(hot, 5)
-        assert {g for g, _ in tops} >= {"职场", "彩礼婚恋"}, tops
-        assert "发布会" not in "".join(w for _, ws in tops for w in ws), "新闻腔标题不该进选题"
-        assert all(w for _, ws in tops for w in ws)
+        assert {g for g, *_ in tops} >= {"职场", "彩礼婚恋"}, tops
+        assert "发布会" not in "".join(w for _, ws, *_ in tops for w in ws), "新闻腔标题不该进选题"
+        assert all(w for _, ws, *_ in tops for w in ws)
         _tw = _load_topic_words()
         assert "彩礼" in _tw.get("彩礼婚恋", []), _tw.get("彩礼婚恋")
         assert _ai_config()[1].startswith("http"), "AI base 没配出默认值"
@@ -2202,10 +2214,14 @@ def main():
                  {"title": "公司裁员不给赔偿", "platforms": ["微博"], "rank": 2},
                  {"title": "年终奖缩水了", "platforms": ["微博"], "rank": 3},
                  {"title": "彩礼谈崩了", "platforms": ["微博"], "rank": 9}]
-        plain = [g for g, _ in _hook_topics(news2, 5)]
+        plain = [g for g, *_ in _hook_topics(news2, 5)]
         bd2 = [{"handle": "x", "name": "x", "text": "这彩礼还能临时涨价", "v": 1,
                 "r": 0, "l": 0, "cat": "none"}] * 8
-        weighted = [g for g, _ in _hook_topics(news2, 5, bang=bd2)]
+        weighted = [g for g, *_ in _hook_topics(news2, 5, bang=bd2)]
+        typed = [g for g, *_ in _hook_topics(
+            news2, 5, types=[{"name": "彩礼算账", "desc": "x", "how": "y",
+                              "sign": ["彩礼"], "hot": 0.3}])]
+        assert typed, typed
         assert plain[0] == "职场" and weighted[0] == "彩礼婚恋", (plain, weighted)
         # 钩子按日期轮换、批内不重复：批内撞车就是「十条八条不懂就问」那个毛病
         d0 = datetime(2026, 10, 6).toordinal()
@@ -2220,7 +2236,7 @@ def main():
                                     {"text": "长" * 200, "v": 9, "cat": "a"},
                                     {"text": "太短", "v": 1, "cat": "a"}])
             assert len(got) == 1, got
-            assert bangdan_samps(got), "池子里挑不出范文"
+            assert bangdan_stats(got)["len"] > 0, "池子规模算不出来"
             (Path(td) / _BD_POOL_FILE).write_text(json.dumps(
                 [{"d": f"2000-01-{d:02d}", "v": 1, "cat": "", "text": "旧" * 200}
                  for d in range(1, 16)]), encoding="utf-8")
@@ -2260,7 +2276,7 @@ def main():
         _bd_save_history(out, hist, fp, terms)
     # 范文池：每天的爆款原文攒进去，跨天去重、只留最近 N 天。写作时从池子里取材。
     pool = _bd_pool_add(out, bang)
-    # 再从整池总结出当天的内容类型（当天只调一次模型），给挑新闻用。
+    # 再从整池总结出当天的内容类型（当天只调一次模型）；挑新闻和写作都走它。
     learn_types(out, pool)
     # 二创规范（hooksupdate.md）也复制一份到站点：豆包那边读同一个 URL，两边就同一份。
     # 站点那份额外把「今日爆款风向」刷成今天的，豆包不用再去翻 bangdan.md。
@@ -2273,7 +2289,8 @@ def main():
     # 板块二优先走 AI 改编：抓来的原贴读起来断章取义（摘要 + 几个热评拼在一起），
     # 用户要的是「热搜话题 -> 有人有事的小故事」。改写失败就退回原贴，不开天窗。
     ai_n = 0 if args.no_ai else args.ai_top
-    ai_stories = ai_write_stories(items, stories, ai_n, bang=bang) if ai_n else []
+    types = load_types(out)
+    ai_stories = ai_write_stories(items, stories, ai_n, bang=bang, types=types) if ai_n else []
     posted = ai_stories or stories
     (out / "copy.txt").write_text(
         render_pool(posted, top=args.story_top) if posted
@@ -2438,7 +2455,7 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=1200):
 
 _BD_TYPES_FILE = "bangdan_types.json"    # 当天从范文池总结出来的内容类型
 
-_TYPES_V = 2          # 提示词改版就 +1，让当天已经缓存的旧类型自动作废重算
+_TYPES_V = 3          # 提示词改版就 +1，让当天已经缓存的旧类型自动作废重算
 
 _TYPES_SYSTEM = """你在给一个中文社媒热点账号做选题分析。看下面这批 X 爆款正文，
 总结出 6~10 个「内容类型」。
@@ -2455,10 +2472,22 @@ _TYPES_SYSTEM = """你在给一个中文社媒热点账号做选题分析。看�
 - desc  一句话：这类爆款在讲什么、为什么跑得动
 - sign  8~12 个识别词，用来在新闻标题里认出同类题材。挑「同类事件都会出现的词」
         （彩礼 / 涨价 / 退货 / 翻车 / 实测 / 骗局 / 欠薪 / 反悔），别挑只属于今天那条新闻的词
+- how   这类爆款通常怎么写：开头怎么起、写几段、每段多长、怎么收尾。2~3 句，要具体，
+        别写「要有感染力」这种空话。这条会直接当写作指令用，所以必须能照着做。
 - hot   这类在样本里大概占多少，0~1 的小数
 
 只输出 JSON 数组，不要解释、不要 ``` 包裹：
 [{"name": "..", "desc": "..", "sign": [".."], "hot": 0.2}]"""
+
+
+def match_types(title, types):
+    """这条新闻撞上了哪几类内容类型，热的排前面。
+
+    挑新闻（今日精选）和选题（板块二）都走这一个口子，两边口径才不会分叉。
+    """
+    hit = [(t.get("hot") or 0, t["name"]) for t in (types or [])
+           if any(x and x in (title or "") for x in (t.get("sign") or []))]
+    return [n for _, n in sorted(hit, reverse=True)]
 
 
 def load_types(out_dir):
@@ -2530,21 +2559,6 @@ def bangdan_stats(pool):
     # 只算字数：池子里的原文是抓来的整块文本，段落早被压平了，数段数只会得出「1 段」
     lens = sorted(len(t) for t in txt)
     return {"len": lens[len(lens) // 2]}
-
-
-def bangdan_samps(pool, n=3, cap=450):
-    """从范文池里挑几篇当范文：曝光高的优先，太短的笑话型学不到骨架。"""
-    rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 120),
-                  key=lambda r: -(r.get("v") or 0))
-    out = []
-    for r in rows:
-        t = r["text"].strip()
-        if any(t[:60] == o[:60] for o in out):
-            continue
-        out.append(t[:cap])
-        if len(out) >= n:
-            break
-    return out
 
 
 def render_bangdan_auto(fp, terms, hist, now=None, pool=None):
