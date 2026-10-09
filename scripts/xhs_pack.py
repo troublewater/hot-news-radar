@@ -70,12 +70,13 @@ _FACT_ONLY = re.compile(r"签署|协议|财报|季度|同比|增长|指数|收�
                         r"上线|发布|获批|印发|试点|规划|部署|架构|开源")
 
 
-def score_news(items, fp, keywords, weights=None):
+def score_news(items, fp, keywords, weights=None, types=None):
     """给每条新闻打分：够不够「爆款相」。分项全部写进 why，方便人一眼看出为什么选它。
 
     weights = 近 14 天从爆款源学出来的「爆火机制」权重（见 gen_x_card.bangdan_learn）。
-    这一步才是「用爆款的逻辑推测新闻的潜在价值」：机制是同一张表，能同时套在爆款正文
-    和新闻标题上，所以权重可以从一边学到、用在另一边。
+    types   = 当天从范文池总结出来的内容类型（见 gen_x_card.learn_types），每类带识别词。
+    这一步才是「用爆款的逻辑推测新闻的潜在价值」：机制和类型都是同一张表，能同时套在
+    爆款正文和新闻标题上，所以可以从一边学到、用在另一边。
     """
     styles = {s for s in gx._bd_named(fp.get("styles", []), 4, skip="其他")}
     out = []
@@ -97,6 +98,12 @@ def score_news(items, fp, keywords, weights=None):
         if mech:
             sc += sum(3 * weights[m] for m in mech)
             why += [f"爆款逻辑「{m}」" for m in mech]
+        # 撞上范文池总结出来的内容类型：题材对上了，就是「这类爆款在讲的事」
+        ty = [k["name"] for k in (types or [])
+              if any(s and s in t for s in (k.get("sign") or []))]
+        if ty:
+            sc += 3 * len(ty)
+            why += [f"类型「{n}」" for n in ty]
         hit = sorted([w for w in keywords if w in t], key=len, reverse=True)
         if any(len(w) >= 3 for w in hit):      # 撞上爆款源的高频词算加分，但不是门槛
             sc += 2
@@ -122,7 +129,8 @@ def score_news(items, fp, keywords, weights=None):
         # 够格入选：至少两个「有故事」的信号，或者一个信号 + 对上今天的风向
         strong = [m for m in mech if weights.get(m, 0) >= 0.5]     # 学出来特别稳的机制
         fit = len(story) >= 2 or bool(story and (style or strong))
-        out.append({"score": round(sc, 1), "why": why, "item": it, "fit": fit})
+        out.append({"score": round(sc, 1), "why": why, "item": it, "fit": fit,
+                    "type": ty[0] if ty else ""})
     out.sort(key=lambda x: -x["score"])
     return out
 
@@ -235,8 +243,10 @@ def _xhs_prompt(picked, fp, samples=None, stats=None):
     user += ["", "把这些热点各写成一条爆款推文，一条一个，顺序对应："]
     for n, row in enumerate(picked, 1):
         it = row["item"]
+        # 把匹配到的爆款类型一起告诉模型：这条该按哪一类写
+        tname = f"，爆款类型：{row['type']}" if row.get("type") else ""
         user.append(f"{n}. [{it['group']}] {it['title']}"
-                    f"（{'/'.join(it['platforms'])} 第{it['rank']}位）")
+                    f"（{'/'.join(it['platforms'])} 第{it['rank']}位{tname}）")
     user += ["", f"数组长度必须是 {len(picked)}。"]
     return "\n".join(user)
 
@@ -453,6 +463,11 @@ def selftest():
     ]
     fp = {"hooks": [("破防", 3), ("暴论", 2)], "styles": [("都市夜话", 5), ("奇观猎奇", 3)],
           "len_mid": 60, "openers": []}
+    types_demo = [{"name": "婚房算账", "desc": "x", "sign": ["彩礼", "婚房"], "hot": 0.2}]
+    demo = [{"title": "彩礼涨到38万，男方当场走人", "url": "", "platforms": ["微博"],
+             "rank": 1, "count": "", "trend": "", "group": "彩礼婚恋"}]
+    typed = score_news(demo, {"styles": [], "hooks": []}, [], types=types_demo)
+    assert typed[0]["type"] == "婚房算账" and "类型「婚房算账」" in typed[0]["why"], typed[0]
     sc = score_news(items, fp, ["楼市", "翻车"])
     assert all("开售" not in r["item"]["title"] for r in sc), "广告稿没被踢掉"
     assert sc[0]["item"]["title"].startswith("商k"), sc[0]
@@ -516,7 +531,11 @@ def main():
     if weights:
         top = sorted(weights.items(), key=lambda kv: -kv[1])[:5]
         print("  近 14 天学出来的爆火机制：" + "、".join(f"{k} {v:.2f}" for k, v in top))
-    scored = score_news(items, fp, keywords, weights)
+    types = gx.load_types(Path(args.out_dir).parent / "x")
+    if types:
+        print(f"  内容类型 {len(types)} 类："
+              + "、".join(t["name"] for t in types[:6]))
+    scored = score_news(items, fp, keywords, weights, types)
     picked = pick_top(scored, args.top, keywords)
     print(f"新闻筛选：{len(items)} 条候选 -> 取 {len(picked)} 条")
     print(f"  今天的高频题材词：{'、'.join(keywords[:10])}")
