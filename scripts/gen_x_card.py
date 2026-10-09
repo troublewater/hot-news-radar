@@ -1600,6 +1600,8 @@ _COMMON = {
     "效果", "方式", "日子", "早上", "晚上", "夜里", "楼下", "楼上", "家里", "店里", "街上",
     "公司", "公园", "公开", "公平", "公安", "公里", "公民", "属于", "居民", "局长", "所以",
     "马上", "时间", "时刻", "全身", "高手", "相处", "后果", "员工", "段子", "零件", "社区",
+    # 钩子词和机构名：都是句子开头，形状跟「姓+名」一模一样，但都不是人
+    "冷知识", "热知识", "纪委",
 }
 
 
@@ -1627,15 +1629,21 @@ def _name_cands(text):
 def invented_names(text, src=""):
     """正文里疑似编出来的人名：原文没有、出现在句首、后面还跟着动作或称呼。
 
-    只认这一种形状——宁可漏掉一条，也不要把普通词误杀成名字（模型写错了顶多被读者看出来，
-    误杀是直接少一条稿）。
+    只有两种形状定罪，其余一律放过（模型写错顶多被读者看出来，误杀是直接少一条稿）：
+      1) 姓 + 称呼（王奶奶 / 张阿姨 / 赵女士），出现一次就算；
+      2) 姓 + 1~2 字，且整条里出现 >= 2 次 —— 编出来的主角一定会被反复提起。
+    第 2 条不能省：「冷知识」「纪委的回应」「钱花在」「连对方也」全是句子开头 + 常见动词，
+    只看形状会把它们当人名，整条稿子白丢。
     """
     text, src = text or "", src or ""
     out = []
     for cand, end in _name_cands(text):
         if cand in src or cand in _COMMON:
             continue
-        if text.startswith(_PTITLE, end) or text.startswith(_PVERB, end):
+        # 名字里自带称呼的（王奶奶 / 张阿姨 / 赵女士）一次就够：这种形状基本不可能是常用词
+        if cand[1:] in _PTITLE or text.startswith(_PTITLE, end):
+            out.append(cand)
+        elif text.count(cand) >= 2 and text.startswith(_PVERB, end):
             out.append(cand)
     # 「贺峻霖」和「贺峻」是同一个人的长短两个候选，只留长的
     out.sort(key=len, reverse=True)
@@ -2043,6 +2051,11 @@ def main():
         assert invented_names("李伟在互联网公司上班。后来李伟辞职了。", "彩礼") == ["李伟"]
         assert invented_names("王奶奶把养老钱捂得紧紧的。", "") == ["王奶奶"]
         assert invented_names("刘浩哭了。刘浩说再也不碰了。", "刘浩是个体育老师") == []
+        assert invented_names("冷知识：这样操作居然是合规的。", "") == []
+        assert invented_names("纪委的回应是：正在核实。", "") == []
+        assert invented_names("连对方也没想到会这样。", "") == []
+        assert invented_names("钱花在哪儿了没人说得清。", "") == []
+        assert invented_names("赵女士当场就报了警。", "") == ["赵女士"]
         assert invented_names("马路上车很多，马路两边都停满了，白天也没人管。", "") == [], \
             "「马路」「白天」被当成名字了"
         # 一批挂掉不该把后面的批全废掉：限流是随机的，接着试还能捞回来
