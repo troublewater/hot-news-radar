@@ -382,7 +382,7 @@ def render_pack(picked, wrote, site, handle="", now=None):
 <div class="wrap">{''.join(cards)}</div></body></html>"""
 
 
-def push_feishu(site, n, first_title, with_pic=0):
+def push_feishu(site, n, first_title, with_pic=0, with_text=True):
     """推飞书。只递一个链接过去——飞书自定义机器人发不了外链图片，
     原贴配图只能在页面里看，所以「有几条带图」写进正文里说明白。"""
     webhook = os.environ.get("FEISHU_WEBHOOK_URL", "").strip()
@@ -393,7 +393,9 @@ def push_feishu(site, n, first_title, with_pic=0):
     # 首行固定带「热点」：飞书自定义机器人的关键词校验靠它过
     content = "\n".join([
         f"📮 今日热点精选（{n} 条）", "",
-        "标题 + 正文 + 话题 + 原贴配图链接都排好了，点开照着发：",
+        ("标题 + 正文 + 话题 + 原贴配图链接都排好了，点开照着发："
+         if with_text else
+         "这轮写作模型被限流（429），只出了选题、没出正文，点开先看选题："),
         f"[📕 打开今日热点精选]({site}/xhs/pack.html)",
         f"（{with_pic}/{n} 条原贴带图，其余的热榜链接是搜索页/列表页，本来就没图）",
         "", f"首条：{first_title}",
@@ -492,8 +494,9 @@ def main():
          for n, r in enumerate(picked, 1)], "notes": wrote}, ensure_ascii=False, indent=1),
         encoding="utf-8")
     print(f"图文包：{out/'pack.html'}")
-    if wrote and picked:
-        push_feishu(args.site, len(picked), picked[0]["item"]["title"], got)
+    # 没出正文也照推：不然你那边一整天静悄悄，还以为是流水线挂了
+    if picked:
+        push_feishu(args.site, len(picked), picked[0]["item"]["title"], got, bool(wrote))
 
 
 if __name__ == "__main__":
