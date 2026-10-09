@@ -2260,6 +2260,8 @@ def main():
         _bd_save_history(out, hist, fp, terms)
     # 范文池：每天的爆款原文攒进去，跨天去重、只留最近 N 天。写作时从池子里取材。
     pool = _bd_pool_add(out, bang)
+    # 再从整池总结出当天的内容类型（当天只调一次模型），给挑新闻用。
+    learn_types(out, pool)
     # 二创规范（hooksupdate.md）也复制一份到站点：豆包那边读同一个 URL，两边就同一份。
     # 站点那份额外把「今日爆款风向」刷成今天的，豆包不用再去翻 bangdan.md。
     memo = Path(__file__).resolve().parent.parent / "hooksupdate.md"
@@ -2432,6 +2434,75 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=1200):
     (Path(out_dir) / _BD_POOL_FILE).write_text(
         json.dumps(pool, ensure_ascii=False), encoding="utf-8")
     return pool
+
+
+_BD_TYPES_FILE = "bangdan_types.json"    # 当天从范文池总结出来的内容类型
+
+_TYPES_SYSTEM = """你在给一个中文社媒热点账号做选题分析。把下面这批 X 爆款正文归类，
+总结出 6~10 个「内容类型」。
+
+每类四个字段：
+- name  4~8 字的类型名，要一眼看懂讲的是什么事（不要「情感」「社会」「生活」这种大词）
+- desc  一句话：这类爆款在讲什么、为什么跑得动
+- sign  8~12 个识别词，用来在新闻标题里认出同类题材（要具体，别用「事件」「网友」「事情」）
+- hot   这类在样本里大概占多少，0~1 的小数
+
+只输出 JSON 数组，不要解释、不要 ``` 包裹：
+[{"name": "..", "desc": "..", "sign": [".."], "hot": 0.2}]"""
+
+
+def load_types(out_dir):
+    """读当天总结出来的内容类型。读不到就返回空，打分退回机制权重。"""
+    try:
+        data = json.loads((Path(out_dir) / _BD_TYPES_FILE).read_text(
+            encoding="utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    return [t for t in (data.get("types") or [])
+            if isinstance(t, dict) and t.get("name") and t.get("sign")]
+
+
+def learn_types(out_dir, pool, now=None, sample=24):
+    """把整个范文池交给模型，总结出今天跑得动的「内容类型」，当天只算一次。
+
+    池子是累积的，几百篇没法整池喂给写作模型；先归成 6~10 个类型 + 每类的识别词，
+    再用这些词去匹配今天的新闻标题——这才是「拿爆款的逻辑挑新闻」，而不是看几篇范文。
+    """
+    now = now or datetime.now()
+    path = Path(out_dir) / _BD_TYPES_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        data = {}
+    old = data.get("types") if isinstance(data, dict) else None
+    if isinstance(data, dict) and data.get("d") == f"{now:%Y-%m-%d}" and old:
+        return old                        # 一天几十轮，当天算过就不再调模型
+    rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 120),
+                  key=lambda r: -(r.get("v") or 0))[:sample]
+    key, base, model = _ai_config()
+    if len(rows) < 5 or not key:
+        return old or []
+    body = "\n\n".join(f"[{n}] {r['text'][:300]}" for n, r in enumerate(rows, 1))
+    text = _ai_call(key, base, model, _TYPES_SYSTEM,
+                    f"这批是 X 中文区跑得动的爆款，共 {len(rows)} 篇：\n\n{body}")
+    start = (text or "").find("[")
+    types = []
+    if start >= 0:
+        try:
+            types = json.loads(text[start:])
+        except ValueError:
+            types = []
+    types = [t for t in types if isinstance(t, dict) and t.get("name") and t.get("sign")]
+    if not types:
+        print("  ⚠️ 内容类型没总结出来，这轮退回机制权重打分")
+        return old or []
+    path.write_text(json.dumps({"d": f"{now:%Y-%m-%d}", "n": len(pool), "types": types},
+                               ensure_ascii=False), encoding="utf-8")
+    print(f"  内容类型 {len(types)} 类（从范文池 {len(pool)} 篇总结）："
+          + "、".join(t["name"] for t in types))
+    return types
 
 
 def bangdan_stats(pool):
