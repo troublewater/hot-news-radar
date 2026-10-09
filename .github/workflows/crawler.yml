@@ -127,6 +127,7 @@ jobs:
           # 第一次跑必然没有，所以 || true —— 不能让 set -e 把整个恢复步骤干掉。
           mkdir -p docs/x
           cp /tmp/pages-content/x/bangdan_history.json docs/x/ 2>/dev/null || true
+          cp /tmp/pages-content/x/bangdan_pool.json docs/x/ 2>/dev/null || true
           rm -rf /tmp/pages-content
           echo "历史报告就位：$(ls docs/reports | wc -l) 个条目"
 
