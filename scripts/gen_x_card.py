@@ -2438,13 +2438,23 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=1200):
 
 _BD_TYPES_FILE = "bangdan_types.json"    # 当天从范文池总结出来的内容类型
 
-_TYPES_SYSTEM = """你在给一个中文社媒热点账号做选题分析。把下面这批 X 爆款正文归类，
+_TYPES_V = 2          # 提示词改版就 +1，让当天已经缓存的旧类型自动作废重算
+
+_TYPES_SYSTEM = """你在给一个中文社媒热点账号做选题分析。看下面这批 X 爆款正文，
 总结出 6~10 个「内容类型」。
 
+「内容类型」= 这类内容**讲的是哪一种事、从哪个角度讲**，必须能套到别的新闻上，
+不是今天的热点本身。举例：
+  正例：金钱供养反被反噬 / 权威实测当场翻车 / 感情里的算计与反算计 / 技术黑产奇闻 /
+        打工人被规则卡住 / 顶级玩家翻车 / 占便宜占出事
+  反例：华为车圈争议 / 懂车帝实测风波 / 特朗普买卖股票
+        —— 这些是具体事件或具体公司，换个热点就套不上，一律不许出现。
+
 每类四个字段：
-- name  4~8 字的类型名，要一眼看懂讲的是什么事（不要「情感」「社会」「生活」这种大词）
+- name  4~8 字的类型名，一眼看出是什么事；不许出现公司名、产品名、人名、事件名
 - desc  一句话：这类爆款在讲什么、为什么跑得动
-- sign  8~12 个识别词，用来在新闻标题里认出同类题材（要具体，别用「事件」「网友」「事情」）
+- sign  8~12 个识别词，用来在新闻标题里认出同类题材。挑「同类事件都会出现的词」
+        （彩礼 / 涨价 / 退货 / 翻车 / 实测 / 骗局 / 欠薪 / 反悔），别挑只属于今天那条新闻的词
 - hot   这类在样本里大概占多少，0~1 的小数
 
 只输出 JSON 数组，不要解释、不要 ``` 包裹：
@@ -2477,10 +2487,13 @@ def learn_types(out_dir, pool, now=None, sample=24):
     except (OSError, ValueError):
         data = {}
     old = data.get("types") if isinstance(data, dict) else None
-    if isinstance(data, dict) and data.get("d") == f"{now:%Y-%m-%d}" and old:
+    if (isinstance(data, dict) and data.get("d") == f"{now:%Y-%m-%d}"
+            and data.get("v") == _TYPES_V and old):
         return old                        # 一天几十轮，当天算过就不再调模型
     rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 120),
-                  key=lambda r: -(r.get("v") or 0))[:sample]
+                  key=lambda r: -(r.get("v") or 0))
+    # 取样要铺开：只取曝光最高那几条，全挤在同一个热点上，总结出来就是「具体事件」不是类型
+    rows = rows[::max(1, len(rows) // sample)][:sample]
     key, base, model = _ai_config()
     if len(rows) < 5 or not key:
         return old or []
@@ -2498,8 +2511,8 @@ def learn_types(out_dir, pool, now=None, sample=24):
     if not types:
         print("  ⚠️ 内容类型没总结出来，这轮退回机制权重打分")
         return old or []
-    path.write_text(json.dumps({"d": f"{now:%Y-%m-%d}", "n": len(pool), "types": types},
-                               ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps({"d": f"{now:%Y-%m-%d}", "n": len(pool), "v": _TYPES_V,
+                                "types": types}, ensure_ascii=False), encoding="utf-8")
     print(f"  内容类型 {len(types)} 类（从范文池 {len(pool)} 篇总结）："
           + "、".join(t["name"] for t in types))
     return types
@@ -2514,14 +2527,9 @@ def bangdan_stats(pool):
     txt = [r["text"].strip() for r in (pool or []) if len(r.get("text") or "") >= 120]
     if not txt:
         return {}
-
-    def mid(xs):
-        xs = sorted(xs)
-        return xs[len(xs) // 2]
-
-    segs = [max(1, len([x for x in t.split("\n") if x.strip()])) for t in txt]
-    return {"len": mid([len(t) for t in txt]), "segs": mid(segs),
-            "seg_len": mid([len(t) // n for t, n in zip(txt, segs)])}
+    # 只算字数：池子里的原文是抓来的整块文本，段落早被压平了，数段数只会得出「1 段」
+    lens = sorted(len(t) for t in txt)
+    return {"len": lens[len(lens) // 2]}
 
 
 def bangdan_samps(pool, n=3, cap=450):
