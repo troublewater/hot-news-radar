@@ -413,12 +413,12 @@ ai:
   api_base: "https://open.bigmodel.cn/api/paas/v4"   # 智谱GLM官方端点
   # 板块二（X 文案）改写专用模型：这个活儿比分析/翻译难，别跟着用 flash 小模型，
   # 否则它只会把新闻复述一遍、或者只写一段。留空则沿用上面的 model。
-  x_writer_model: "glm-4.7-flash"
+  x_writer_model: "deepseek-chat"
   # 换 DeepSeek：先在 GitHub Secrets 加 X_WRITER_API_KEY（值＝DeepSeek 的 key），
   # 再把下面两行的注释去掉，并把上面 x_writer_model 改成 "deepseek-chat"。
   # 没配专属 key 时下面两行会被忽略，仍然走上面的 api_base——免得拿旧 key 撞 401；
   # 也别在没 key 的时候单开 api_base，那样模型名会对不上端点。
-  # x_writer_api_base: "https://api.deepseek.com"
+  x_writer_api_base: "https://api.deepseek.com"
   # x_writer_api_key: ""
   analysis_model: "openai/glm-4-flash"      # 分析专用(与翻译同模型, 稳定不限流; 如需推理可改 glm-4.7-flash)
                                             # 推理模型适合分析/筛选等复杂判断；翻译保持用快速模型
