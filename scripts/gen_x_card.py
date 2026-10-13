@@ -977,32 +977,30 @@ def _ai_config():
     """
     y = _yaml_ai()
     wkey = os.environ.get("X_WRITER_API_KEY", "").strip() or y.get("x_writer_api_key", "")
-    wbase = y.get("x_writer_api_base", "")
-    if wkey:
+    wbase = os.environ.get("X_WRITER_API_BASE", "").strip() or y.get("x_writer_api_base", "")
+    if wkey and wbase:
         key = wkey
-        base = os.environ.get("X_WRITER_API_BASE", "").strip() or wbase or _AI_BASE
+        base = wbase
         # 专属 key 在场时以 x_writer_model 为准（AI_MODEL 是爬虫那边的设置）
         model = y.get("x_writer_model", "") or _AI_MODEL
     else:
-        # 端点配了别家、专属 key 还没填：拿旧 key 去撞就是 401，整批文案全空。
-        # 所以这里宁可先用原供应商，只提醒一句。
+        # key 和端点必须成对出现。只留 key（换供应商时忘了撤 Secret 就是这种）＝
+        # 拿别家的 key 去撞原端点，401，整批文案一起空；只留端点同理（404）。
+        # 所以缺一半就当没配，仍旧走原供应商，只提醒一句。
+        if wkey or wbase:
+            print("  ⚠️ 板块二的专属 key / 端点只配了一半，这轮仍用原供应商")
         key = os.environ.get("AI_API_KEY", "").strip() or y.get("api_key", "")
         base = os.environ.get("AI_API_BASE", "").strip() or y.get("api_base", "") or _AI_BASE
-        if wbase:
-            # 配了别家端点却没给 key：这时候 x_writer_model 是那家的模型名，
-            # 拿它去撞原供应商只会 404，所以连模型一起退回原供应商。
-            print("  ⚠️ 配了 ai.x_writer_api_base 但没配 ai.x_writer_api_key，这轮仍用原供应商")
-            model = (os.environ.get("AI_MODEL", "").strip()
-                     or y.get("model", "") or _AI_MODEL)
-        else:
-            # 写故事可以单独指定模型（ai.x_writer_model）：爬虫的 AI 分析用什么跟这里无关
-            model = (os.environ.get("AI_MODEL", "").strip()
-                     or y.get("x_writer_model", "") or y.get("model", "") or _AI_MODEL)
+        # 单独指定写作模型（ai.x_writer_model）可以；但配了别家端点又没给 key 时，
+        # 那个模型名属于别家，撞原端点只会 404，所以一起退回。
+        model = (os.environ.get("AI_MODEL", "").strip()
+                 or ("" if wbase else y.get("x_writer_model", ""))
+                 or y.get("model", "") or _AI_MODEL)
     if model.startswith("openai/"):              # LiteLLM 前缀，直连时要去掉
         model = model.split("/", 1)[1]
     # 这轮到底用了哪家模型，看日志这一行就够，不用去猜成稿率为什么变
     print(f"  写作模型：{model} @ {base.split('//')[-1].split('/')[0]}"
-          + ("（专属 key）" if wkey else "（沿用 AI_API_KEY）"))
+          + ("（专属 key）" if (wkey and wbase) else "（沿用 AI_API_KEY）"))
     return key, base.rstrip("/"), model
 
 
@@ -2106,17 +2104,23 @@ def main():
         _tw = _load_topic_words()
         assert "彩礼" in _tw.get("彩礼婚恋", []), _tw.get("彩礼婚恋")
         assert _ai_config()[1].startswith("http"), "AI base 没配出默认值"
-        # 换供应商只认「专属 key」：端点改了、key 没填时不能拿旧 key 去撞 401
-        os.environ.pop("X_WRITER_API_KEY", None)
-        no_wkey = _ai_config()
-        if _yaml_ai().get("x_writer_api_base"):       # 配置里确实指了别家才谈得上回退
-            assert "deepseek" not in no_wkey[1], f"没专属 key 却把端点切走了：{no_wkey[1]}"
+        # 专属供应商：key + 端点成对才算数
         os.environ["X_WRITER_API_KEY"] = "sk-test-only"
+        os.environ["X_WRITER_API_BASE"] = "https://api.deepseek.com"
         try:
-            w = _ai_config()
+            pair = _ai_config()
         finally:
             os.environ.pop("X_WRITER_API_KEY", None)
-        assert w[0] == "sk-test-only" and w[1].startswith("http"), w
+            os.environ.pop("X_WRITER_API_BASE", None)
+        assert pair[0] == "sk-test-only" and "deepseek" in pair[1], pair
+        # 只留 key（换供应商时忘了撤 Secret）不能把端点切走，否则就是 401
+        os.environ["X_WRITER_API_KEY"] = "sk-test-only"
+        try:
+            half = _ai_config()
+        finally:
+            os.environ.pop("X_WRITER_API_KEY", None)
+        assert "deepseek" not in half[1] and half[1] == _AI_BASE, \
+            f"只配了 key 就把端点切走了：{half}"
         assert _fallbacks("https://api.deepseek.com")[0] == "deepseek-chat"
         assert _fallbacks("https://open.bigmodel.cn/api/paas/v4")[0] == "glm-4.7-flash"
         assert _fallbacks("https://my-relay.example.com/v1") == []
