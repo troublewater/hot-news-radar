@@ -1,0 +1,59 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Hot News Radar 快照订阅",
+  "home_page_url": "https://troublewater.github.io/hot-news-radar/",
+  "feed_url": "https://troublewater.github.io/hot-news-radar/reports/feed.json",
+  "description": "每日新闻雷达快照更新通知",
+  "language": "zh-CN",
+  "items": [
+    {
+      "id": "2026-10-31",
+      "url": "https://troublewater.github.io/hot-news-radar/reports/2026-10-31/23-32.html",
+      "title": "2026-10-31 热点雷达 · 6 个时段快照",
+      "content_text": "2026-10-31 共 6 次抓取，覆盖全天热点变化。首次 03:19，末次 23:32。",
+      "date_published": "2026-10-31T23:32:00+08:00"
+    },
+    {
+      "id": "2026-10-30",
+      "url": "https://troublewater.github.io/hot-news-radar/reports/2026-10-30/22-04.html",
+      "title": "2026-10-30 热点雷达 · 6 个时段快照",
+      "content_text": "2026-10-30 共 6 次抓取，覆盖全天热点变化。首次 00:06，末次 22:04。",
+      "date_published": "2026-10-30T22:04:00+08:00"
+    },
+    {
+      "id": "2026-10-29",
+      "url": "https://troublewater.github.io/hot-news-radar/reports/2026-10-29/16-57.html",
+      "title": "2026-10-29 热点雷达 · 5 个时段快照",
+      "content_text": "2026-10-29 共 5 次抓取，覆盖全天热点变化。首次 02:23，末次 16:57。",
+      "date_published": "2026-10-29T16:57:00+08:00"
+    },
+    {
+      "id": "2026-10-28",
+      "url": "https://troublewater.github.io/hot-news-radar/reports/2026-10-28/19-42.html",
+      "title": "2026-10-28 热点雷达 · 5 个时段快照",
+      "content_text": "2026-10-28 共 5 次抓取，覆盖全天热点变化。首次 03:40，末次 19:42。",
+      "date_published": "2026-10-28T19:42:00+08:00"
+    },
+    {
+      "id": "2026-10-27",
+      "url": "https://troublewater.github.io/hot-news-radar/reports/2026-10-27/22-24.html",
+      "title": "2026-10-27 热点雷达 · 6 个时段快照",
+      "content_text": "2026-10-27 共 6 次抓取，覆盖全天热点变化。首次 01:42，末次 22:24。",
+      "date_published": "2026-10-27T22:24:00+08:00"
+    },
+    {
+      "id": "2026-10-26",
+      "url": "https://troublewater.github.io/hot-news-radar/reports/2026-10-26/19-33.html",
+      "title": "2026-10-26 热点雷达 · 6 个时段快照",
+      "content_text": "2026-10-26 共 6 次抓取，覆盖全天热点变化。首次 00:51，末次 19:33。",
+      "date_published": "2026-10-26T19:33:00+08:00"
+    },
+    {
+      "id": "2026-10-25",
+      "url": "https://troublewater.github.io/hot-news-radar/reports/2026-10-25/20-36.html",
+      "title": "2026-10-25 热点雷达 · 7 个时段快照",
+      "content_text": "2026-10-25 共 7 次抓取，覆盖全天热点变化。首次 02:08，末次 20:36。",
+      "date_published": "2026-10-25T20:36:00+08:00"
+    }
+  ]
+}
