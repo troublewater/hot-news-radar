@@ -1194,7 +1194,8 @@ def fetch_bangdan(timeout=45):
             if len(text) < 6 or text[:6] in seen:
                 continue
             seen.add(text[:6])      # 两榜大量重叠，同一段开头只留一条
-            rows.append({"handle": it.get("h", ""), "name": it.get("n", ""), "text": text,
+            rows.append({"id": it.get("id", ""), "handle": it.get("h", ""),
+                         "name": it.get("n", ""), "text": text,
                          "v": int(it.get("v") or 0), "r": int(it.get("r") or 0),
                          "l": int(it.get("l") or 0), "age": it.get("age") or 0,
                          "cat": it.get("c") or "none"})
@@ -1211,6 +1212,20 @@ def fetch_bangdan(timeout=45):
 _SOPILOT = "https://sopilot.net/zh/rank/tweets?range={range}"
 _SOPILOT_ANCHOR = re.compile(
     r'<a[^>]+href="(https://x[.]com/[^"?]+?/status/\d+)"[^>]*>(.*?)</a>', re.S)
+
+
+def _bd_full_text(tid, handle, timeout=12):
+    """按推文 id 取全文。xbangdan 的 t 字段只有 80 字，蒸馏学不到结构。"""
+    if not tid or not handle:
+        return ""
+    url = f"https://api.fxtwitter.com/{handle}/status/{tid}"
+    try:
+        req = urllib.request.Request(url, headers=_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "ignore"))
+        return ((data.get("tweet") or {}).get("text") or "").strip()
+    except Exception:        # noqa: BLE001 - 查不到就保留摘要，不能拖垮整轮
+        return ""
 
 
 def fetch_sopilot(ranges=("24h", "yesterday"), timeout=45):
@@ -1873,6 +1888,8 @@ def main():
     ap.add_argument("--no-ai", action="store_true", help="不做 AI 改编，直接发抓来的原贴")
     ap.add_argument("--ai-top", type=int, default=12, help="AI 改编几条（要 30 条得有人工挑）")
     ap.add_argument("--handle", default="", help="卡片右下角署名，如 @your_x_handle")
+    ap.add_argument("--backfill", action="store_true",
+                    help="把池子里的 80 字摘要换成全文（不调写作模型）")
     ap.add_argument("--learn-only", action="store_true",
                     help="只更新爆款池/内容类型/links/hooksupdate，不出卡片也不写文案")
     ap.add_argument("--ai-probe", action="store_true", help="探测当前 key 能用哪些模型")
@@ -2253,6 +2270,13 @@ def main():
               f"{items[0]['trend'] or '-'} {items[0]['count'] or '-'}")
         return
 
+    if args.backfill:
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        backfill_pool(out_dir, fetch_hot_sources())
+        print("范文池 -> " + str(out_dir / _BD_POOL_FILE))
+        return
+
     src = Path(args.source)
     if not src.is_file():
         raise SystemExit(f"找不到报告：{src}（先跑一次爬虫，或指定 --source）")
@@ -2466,6 +2490,7 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=2000):
     day = f"{now:%Y-%m-%d}"
     pool = _bd_pool(out_dir)
     idx = {r["text"][:60]: n for n, r in enumerate(pool)}
+    added = []
     for r in bang or []:
         t = re.sub(r"\n{2,}", "\n", (r.get("text") or "").strip())
         if len(t) < 60:                      # 单句 / 转发型短帖学不到写法
@@ -2477,8 +2502,21 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=2000):
                 pool[n]["text"] = t[:cap]
             continue
         idx[k] = len(pool)
-        pool.append({"d": day, "v": r.get("v") or 0, "cat": r.get("cat") or "",
-                     "text": t[:cap]})
+        entry = {"d": day, "v": r.get("v") or 0, "cat": r.get("cat") or "",
+                 "id": r.get("id") or "", "h": r.get("handle") or "", "text": t[:cap]}
+        pool.append(entry)
+        added.append(entry)
+
+    # 榜单只给 80 字开头，能查到推文 id 的立刻补全文（每轮最多 200 条，8 路并发）
+    todo = [x for x in added if x.get("id") and len(x.get("text") or "") <= 80][:200]
+    if todo:
+        def _work(x):
+            return x, _bd_full_text(x["id"], x.get("h") or "")
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for x, txt in ex.map(_work, todo):
+                if txt and len(txt) > len(x["text"]):
+                    x["text"] = txt[:cap]
+        print(f"  补全文：{sum(1 for x in todo if len(x['text']) > 80)}/{len(todo)} 条")
     keep = sorted({r["d"] for r in pool})[-_BD_POOL_DAYS:]
     pool = [r for r in pool if r["d"] in keep]
     if len(pool) > max_n:                    # 池子不能无限长：先保能学结构的全文，再按曝光
@@ -2486,6 +2524,51 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=2000):
                       reverse=True)[:max_n]
     (Path(out_dir) / _BD_POOL_FILE).write_text(
         json.dumps(pool, ensure_ascii=False), encoding="utf-8")
+    return pool
+
+
+def backfill_pool(out_dir, rows, limit=600):
+    """把池子里 80 字摘要换成全文。
+
+    老条目没存 id，只能拿今天的榜单按开头 60 字对；对不上的保持原样（来源已经查不到）。
+    新条目从今往后都会带 id，随时能补。
+    """
+    pool = _bd_pool(out_dir)
+    key = lambda t: re.sub(r"\s+", "", t or "")[:60]
+    today = {}
+    for r in rows or []:
+        if r.get("id"):
+            today[key(r.get("text"))] = r
+    todo = []
+    for p in pool:
+        if len(p.get("text") or "") > 90:
+            continue
+        tid, h = p.get("id"), p.get("h")
+        if not (tid and h):
+            m = today.get(key(p.get("text")))
+            if m:
+                p["id"], p["h"] = m["id"], m.get("handle") or ""
+                tid, h = p["id"], p["h"]
+        if tid and h:
+            todo.append((p, tid, h))
+    todo = todo[:limit]
+    if not todo:
+        print("  没有可补的条目（缺推文 id）")
+        return pool
+
+    def _work(item):
+        p, tid, h = item
+        return p, _bd_full_text(tid, h)
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for p, txt in ex.map(_work, todo):
+            if txt and len(txt) > len(p["text"]):
+                p["text"] = txt[:600]
+                done += 1
+    (Path(out_dir) / _BD_POOL_FILE).write_text(
+        json.dumps(pool, ensure_ascii=False), encoding="utf-8")
+    print(f"  补全文：{done}/{len(todo)} 条")
     return pool
 
 
@@ -2522,10 +2605,13 @@ def _pool_sample(pool, sample=30, days=7):
     池子会越攒越大，但「怎么写」是会过时的——只喂 14 天前的范文，学出来的
     是上个版本的写法。按天配额还能防止某一天的爆款（同一个事件）占满样本。
     """
+    base = [r for r in (pool or []) if len(r.get("text") or "") >= 60]
+    full = [r for r in base if len(r.get("text") or "") >= 120]
+    if len(full) >= 40:                  # 全文够多就别再拿 80 字摘要凑数
+        base = full
     by = {}
-    for r in pool or []:
-        if len(r.get("text") or "") >= 60:
-            by.setdefault(r.get("d") or "", []).append(r)
+    for r in base:
+        by.setdefault(r.get("d") or "", []).append(r)
     keep = sorted(by)[-days:]
     if not keep:
         return []
