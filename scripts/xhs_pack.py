@@ -29,7 +29,7 @@ import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -457,7 +457,8 @@ def x_intent(title, body=""):
 
 def render_pack(picked, wrote, site, handle="", now=None):
     """打包页：封面图 + 标题 + 正文 + 话题，一条一条照抄就能发。"""
-    now = now or datetime.now()
+    # 跑在 GitHub Actions 上时机器是 UTC，直接 now() 会让北京凌晨的页面标成昨天
+    now = now or datetime.now(timezone(timedelta(hours=8)))
     by_i = {int(x.get("i") or 0): x for x in wrote}
     cards = []
     for n, row in enumerate(picked, 1):
