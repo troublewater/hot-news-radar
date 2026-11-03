@@ -1873,6 +1873,8 @@ def main():
     ap.add_argument("--no-ai", action="store_true", help="不做 AI 改编，直接发抓来的原贴")
     ap.add_argument("--ai-top", type=int, default=12, help="AI 改编几条（要 30 条得有人工挑）")
     ap.add_argument("--handle", default="", help="卡片右下角署名，如 @your_x_handle")
+    ap.add_argument("--learn-only", action="store_true",
+                    help="只更新爆款池/内容类型/links/hooksupdate，不出卡片也不写文案")
     ap.add_argument("--ai-probe", action="store_true", help="探测当前 key 能用哪些模型")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
@@ -2263,6 +2265,29 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     handle = args.handle or "@DrAnswerMe"
 
+    if args.learn_only:
+        # 卡片和板块二文案都不做了，但「每天从爆款源学规则」这条链路要留着：
+        # 今日热点精选的类型匹配全靠它。只更新文件，不调写作模型。
+        bang = [] if args.no_bangdan else fetch_hot_sources()
+        fp = bangdan_fingerprint(bang)
+        terms = _bd_terms(bang)
+        (out / "bangdan.md").write_text(render_bangdan(bang), encoding="utf-8")
+        hist = _bd_history(out)
+        if fp["n"]:
+            _bd_save_history(out, hist, fp, terms)
+        pool = _bd_pool_add(out, bang)
+        types = learn_types(out, pool)
+        memo = Path(__file__).resolve().parent.parent / "hooksupdate.md"
+        if memo.is_file():
+            (out / "hooksupdate.md").write_text(
+                _splice_auto(memo.read_text(encoding="utf-8", errors="ignore"),
+                             render_bangdan_auto(fp, terms, hist, pool=pool)),
+                encoding="utf-8")
+        (out / "links.txt").write_text(
+            render_links(items, bang=bang, top=args.link_top), encoding="utf-8")
+        print(f"学习完成：样本 {fp['n']} 条，范文池 {len(pool)} 篇，内容类型 {len(types)} 类")
+        return
+
     # 板块一：官方消息 -> 卡片图（飞书里的图）
     (out / "card.html").write_text(
         render_card(official, args.site, top=args.top, handle=handle), encoding="utf-8")
@@ -2546,6 +2571,9 @@ def learn_types(out_dir, pool, now=None, sample=24):
         except ValueError:
             types = []
     types = [t for t in types if isinstance(t, dict) and t.get("name") and t.get("sign")]
+    # 提示词要 6~10 类，模型常一口气给 20 多类（「软件安装」「点赞分析」这种太碎，
+    # 套到新闻上全是噪声）。只留占比最高的 10 类。
+    types = sorted(types, key=lambda t: -(t.get("hot") or 0))[:10]
     if not types:
         print("  ⚠️ 内容类型没总结出来，这轮退回机制权重打分")
         return old or []
