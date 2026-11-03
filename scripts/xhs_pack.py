@@ -57,7 +57,6 @@ _STORY = [
              r"举报|纠纷|闹|拦|抢|逃|骗"),
     ("有反差", r"断裂|断了|塌|崩|爆炸|炸裂|离谱|奇葩|罕见|首次|首例|第一次|奇观|魔幻|"
              r"惊|居然|竟然"),
-    ("婚恋家庭", r"彩礼|结婚|离婚|婚|婆媳|丈母娘|夫妻|份子钱|相亲|带娃|养娃"),
     ("有具体数字", r"[0-9０-９一二三四五六七八九十]+[个条名辆次岁人元万块天年万亿]"),
 ]
 _CONFLICT = re.compile(r"反转|翻车|被骗|被坑|罚款|赔偿|起诉|告上|怒|吵|塌房|退款|维权|抵制|冲突|争议|道歉|打|砸|逃")
@@ -94,7 +93,8 @@ def score_news(items, fp, keywords, weights=None, types=None):
         sc += 2 * len(style)
         why += [f"贴「{n}」" for n in style]
         weights = weights or {}
-        mech = [m for m in gx._mech_hits(t) if weights.get(m)]
+        # 有当天从爆款池总结出来的类型时，机制让位：类型是现学的，机制是写死的 8 个筐。
+        mech = [] if types else [m for m in gx._mech_hits(t) if weights.get(m)]
         if mech:
             sc += sum(3 * weights[m] for m in mech)
             why += [f"爆款逻辑「{m}」" for m in mech]
@@ -103,10 +103,6 @@ def score_news(items, fp, keywords, weights=None, types=None):
         if ty:
             sc += 3 * len(ty)
             why += [f"类型「{n}」" for n in ty]
-        hit = sorted([w for w in keywords if w in t], key=len, reverse=True)
-        if any(len(w) >= 3 for w in hit):      # 撞上爆款源的高频词算加分，但不是门槛
-            sc += 2
-            why.append("题材词 " + "/".join(hit[:2]))
         n = len(it["platforms"])
         if n >= 2:
             sc += 2
@@ -127,7 +123,7 @@ def score_news(items, fp, keywords, weights=None, types=None):
             why.append("新闻腔（只能照实写）")
         # 够格入选：至少两个「有故事」的信号，或者一个信号 + 对上今天的风向
         strong = [m for m in mech if weights.get(m, 0) >= 0.5]     # 学出来特别稳的机制
-        fit = len(story) >= 2 or bool(story and (style or strong))
+        fit = len(story) >= 2 or bool(ty) or bool(story and (style or strong))
         out.append({"score": round(sc, 1), "why": why, "item": it, "fit": fit,
                     "type": ty[0] if ty else ""})
     out.sort(key=lambda x: -x["score"])
@@ -215,7 +211,7 @@ _XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。**写法不�
 
 格式：
 - 标题 <= 20 字，要有情绪 / 悬念 / 数字，可以带 1~2 个 emoji。
-- 正文拆成 3~4 段放进 paras；篇幅照提示里给的「范文池规模」写，没给就 200~350 字。
+- 正文拆成 3~5 段放进 paras；有原文摘录就写到 250~450 字，没有摘录就 150~250 字，别靠编细节凑长度。
 - 结尾单独一行给 6~10 个话题标签，纯词，不要 # 号。
 - 全角标点；引号一律「」；不要英文引号。
 
@@ -234,12 +230,16 @@ def _xhs_prompt(picked, fp, types=None, stats=None):
                  for t in types[:10]]
     if stats:
         user += ["", f"- 正文规模按 {stats['len']} 字上下写，别写成一行一行的碎片"]
-    user += ["", "把这些热点各写成一条爆款推文，一条一个，顺序对应："]
+    user += ["", "有原文摘录的条目，只用摘录里写明的事展开；没有摘录的只按标题写，宁可短，不许补细节。",
+             "", "把这些热点各写成一条爆款推文，一条一个，顺序对应："]
     for n, row in enumerate(picked, 1):
         it = row["item"]
         tname = f"，爆款类型：{row['type']}" if row.get("type") else ""
         user.append(f"{n}. [{it['group']}] {it['title']}"
                     f"（{'/'.join(it['platforms'])} 第{it['rank']}位{tname}）")
+        ex = (it.get("excerpt") or "").strip()
+        if ex:
+            user.append(f"   原文摘录：{ex[:400]}")
     user += ["", f"数组长度必须是 {len(picked)}。"]
     return "\n".join(user)
 
@@ -305,7 +305,8 @@ def xhs_write(picked, fp, now=None, types=None, stats=None):
     for k in range(0, len(picked), _XHS_BATCH):
         chunk = picked[k:k + _XHS_BATCH]
         # 每条能拿来核对的「原文」只有热榜标题（原贴正文抓不到），查编造的名字就靠它
-        src_of = {k + j + 1: r["item"]["title"] for j, r in enumerate(chunk)}
+        src_of = {k + j + 1: r["item"]["title"] + "\n" + (r["item"].get("excerpt") or "")
+                  for j, r in enumerate(chunk)}
         prompt, part = _xhs_prompt(chunk, fp, types, stats), []
         # 模型十次里有几次只交一半（实测 5 条只回 1 条），再要一次基本就补齐了
         for _attempt in (1, 2):
@@ -341,21 +342,60 @@ _OG_TAG = re.compile(r"<meta\b[^>]*>", re.I)
 _OG_KEYS = ("og:image", "twitter:image")
 
 
-def fetch_og_image(url, timeout=8):
-    """从原贴页面取 og:image。慢、失败、本来就没有，都返回空串（不重试）。"""
+_IMG_SKIP = re.compile(
+    r"logo|icon|avatar|emoji|qrcode|qr_|placeholder|default|blank|spacer|/static/|loading", re.I)
+_IMG_OK = re.compile(r"blogfile|upload|article|content|photo|/202[0-9]/|/news/|/p/", re.I)
+_BLOCK = re.compile(r"(?is)<(script|style|noscript|svg|head)[^>]*>.*?</\1>")
+
+
+def _page(url, timeout=15):
+    """抓原贴页面。慢、失败都返回空串（不重试，别拖垮整轮）。"""
     try:
         req = urllib.request.Request(url, headers=dict(gx._HEADERS))
         with gx._OPENER.open(req, timeout=timeout) as resp:
-            page = resp.read(200_000).decode("utf-8", "ignore")
+            return resp.read(250_000).decode("utf-8", "ignore")
     except Exception:            # noqa: BLE001 - 抓不到很正常，不该拖慢整轮
         return ""
+
+
+def _img_from(page):
+    """优先 og:image；没有就退到正文第一张图（虎扑这类根本不放 og 标签）。"""
     for tag in _OG_TAG.findall(page):
         if not any(k in tag for k in _OG_KEYS):
             continue
         m = re.search(r'content=["\']([^"\']+)', tag, re.I)
         if m and m.group(1).startswith("http"):
             return m.group(1)
-    return ""
+    best = ""
+    for src in re.findall(r'<img[^>]+(?:data-src|data-original|src)=["\']([^"\']+)', page, re.I):
+        if src.startswith("//"):
+            src = "https:" + src
+        if not src.startswith("http") or _IMG_SKIP.search(src):
+            continue
+        if _IMG_OK.search(src):
+            return src
+        if not best and not re.search(r"\.(gif|svg)(\?|$)", src, re.I):
+            best = src
+    return best
+
+
+def _text_from(page):
+    """正文摘录：去标签后取较长行，去重，最多 900 字。"""
+    text = _BLOCK.sub(" ", page)
+    text = html.unescape(re.sub(r"(?s)<[^>]+>", "\n", text))
+    lines = [re.sub(r"\s+", " ", x).strip() for x in text.splitlines()]
+    lines = [x for x in lines if len(x) >= 22]
+    return "\n".join(dict.fromkeys(lines))[:900]
+
+
+def fetch_article(url, timeout=15):
+    """一次请求同时拿配图和正文摘录；抓不到就都是空。"""
+    page = _page(url, timeout)
+    return {"img": _img_from(page) if page else "", "text": _text_from(page) if page else ""}
+
+
+def fetch_og_image(url, timeout=15):
+    return fetch_article(url, timeout)["img"]
 
 
 def x_intent(title, body=""):
@@ -498,7 +538,7 @@ def main():
     ap.add_argument("--source", default="docs/reports/latest/current.html")
     ap.add_argument("--out-dir", default="docs/xhs")
     ap.add_argument("--site", default=gx.DEFAULT_SITE)
-    ap.add_argument("--top", type=int, default=10)
+    ap.add_argument("--top", type=int, default=30)
     ap.add_argument("--handle", default="")
     ap.add_argument("--no-ai", action="store_true")
     ap.add_argument("--no-bangdan", action="store_true")
@@ -543,11 +583,13 @@ def main():
     print(f"  范文池累积 {len(pool)} 篇"
           + (f"，规模中位 {stats['len']} 字" if stats else "")
           + f"；按 {len(types)} 类内容类型匹配")
+    # 先把原文/配图抓回来：写作靠它撑篇幅，页面靠它配图（10 条并发，只花最长一条的时间）
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        arts = list(pool.map(lambda r: fetch_article(r["item"]["url"]), picked))
+    for row, art in zip(picked, arts):
+        row["item"]["orig"] = art["img"]
+        row["item"]["excerpt"] = art["text"]
     wrote = [] if args.no_ai else xhs_write(picked, fp, types=types, stats=stats)
-    # 10 条串着抓、每条等 8 秒就是一分多钟；并发只花最长那一条的时间
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        for row, pic in zip(picked, pool.map(lambda r: fetch_og_image(r["item"]["url"]), picked)):
-            row["item"]["orig"] = pic
     got = sum(1 for r in picked if r["item"].get("orig"))
     print(f"  原贴配图：{got}/{len(picked)} 条有（热榜链大多是搜索页，没有就不配图）")
     out = Path(args.out_dir)
