@@ -2277,6 +2277,7 @@ def main():
             _bd_save_history(out, hist, fp, terms)
         pool = _bd_pool_add(out, bang)
         types = learn_types(out, pool)
+        learn_skill(out, pool)
         memo = Path(__file__).resolve().parent.parent / "hooksupdate.md"
         if memo.is_file():
             (out / "hooksupdate.md").write_text(
@@ -2307,6 +2308,7 @@ def main():
     pool = _bd_pool_add(out, bang)
     # 再从整池总结出当天的内容类型（当天只调一次模型）；挑新闻和写作都走它。
     learn_types(out, pool)
+    learn_skill(out, pool)
     # 二创规范（hooksupdate.md）也复制一份到站点：豆包那边读同一个 URL，两边就同一份。
     # 站点那份额外把「今日爆款风向」刷成今天的，豆包不用再去翻 bangdan.md。
     memo = Path(__file__).resolve().parent.parent / "hooksupdate.md"
@@ -2582,6 +2584,86 @@ def learn_types(out_dir, pool, now=None, sample=24):
     print(f"  内容类型 {len(types)} 类（从范文池 {len(pool)} 篇总结）："
           + "、".join(t["name"] for t in types))
     return types
+
+
+_BD_SKILL_FILE = "bangdan_skill.json"    # 从范文池蒸馏出来的「怎么写」规则
+
+_SKILL_V = 1
+
+_SKILL_SYSTEM = """你在拆解一批中文 X 爆款正文，目标是给写作模型一份「照着写就能像」的规则。
+
+只总结**可迁移**的写法：不许复述具体的人、公司、事件，例子只能摘原文短句。
+输出 JSON 对象：
+{
+ "structures": [{"name": "四段反转", "skeleton": "冲突开场/交代代价/一句反转/冷落点", "share": 0.35, "example": "摘一句原文"}],
+ "hooks": [{"kind": "质问", "pattern": "凭什么…", "example": "原文第一句"}],
+ "patterns": [{"pattern": "不是…而是…", "why": "制造反差"}],
+ "length": {"min": 120, "median": 260, "max": 900, "paras": 4},
+ "rules": ["开头三行内必须出现具体代价或数字", "结尾不要问句"],
+ "topics": [{"name": "金钱账本", "angle": "把金额摊开算给人看"}]
+}
+
+要求：
+- structures 3~5 个，share 是占比；skeleton 用「/」分段，4~6 段
+- hooks 5~8 个，pattern 是能套到别的事上的句式，不是具体事件
+- patterns 5~8 个
+- length 按样本真实分布给整数
+- rules 5~8 条，必须能从样本里看出来的硬规则（开头、字数、分段、收尾、标点、禁忌）
+- topics 5~8 个选题方向
+只输出 JSON，不要解释、不要 ``` 包裹。"""
+
+
+def learn_skill(out_dir, pool, now=None, sample=30):
+    """把整池范文蒸馏成一份写作规则，当天只算一次。
+
+    和 learn_types 分工：types 回答「写什么题」，skill 回答「怎么下笔」。
+    池子每天在长，所以这份规则不是一次写死，而是当天重算、跨天沿用旧版兜底。
+    """
+    now = now or datetime.now()
+    path = Path(out_dir) / _BD_SKILL_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        data = {}
+    old = data.get("skill") if isinstance(data, dict) else None
+    if (isinstance(data, dict) and data.get("d") == f"{now:%Y-%m-%d}"
+            and data.get("v") == _SKILL_V and old):
+        return old
+    rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 60),
+                  key=lambda r: -(r.get("v") or 0))
+    rows = rows[::max(1, len(rows) // sample)][:sample]      # 铺开取样，别只看最高曝光
+    key, base, model = _ai_config()
+    if len(rows) < 8 or not key:
+        return old or {}
+    body = "\n\n".join(f"[{n}] {r['text'][:700]}" for n, r in enumerate(rows, 1))
+    text = _ai_call(key, base, model, _SKILL_SYSTEM,
+                    f"这批是 X 中文区跑得动的爆款，共 {len(rows)} 篇：\n\n{body}")
+    start = (text or "").find("{")
+    skill = {}
+    if start >= 0:
+        try:
+            skill = json.loads(text[start:])
+        except ValueError:
+            skill = {}
+    if not isinstance(skill, dict) or not skill.get("structures"):
+        print("  ⚠️ 写作规则没蒸馏出来，这轮只用类型")
+        return old or {}
+    path.write_text(json.dumps({"d": f"{now:%Y-%m-%d}", "v": _SKILL_V, "n": len(pool),
+                                "skill": skill}, ensure_ascii=False), encoding="utf-8")
+    print("  写作规则：骨架 %d 个 / 钩子 %d 个 / 句型 %d 个 / 规则 %d 条" % (
+        len(skill.get("structures") or []), len(skill.get("hooks") or []),
+        len(skill.get("patterns") or []), len(skill.get("rules") or [])))
+    return skill
+
+
+def load_skill(out_dir):
+    """读当天蒸馏好的写法。读不到返回空，提示词就退回只用类型 + 规模。"""
+    try:
+        data = json.loads((Path(out_dir) / _BD_SKILL_FILE).read_text(
+            encoding="utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        return {}
+    return data.get("skill") if isinstance(data, dict) and isinstance(data.get("skill"), dict) else {}
 
 
 def bangdan_stats(pool):
