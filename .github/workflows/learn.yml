@@ -1,0 +1,45 @@
+name: Learn bangdan (manual)
+
+# 只重蒸「爆款池 → 内容类型 / 写作规则」，不爬新闻、不出页面、不推飞书。
+# 改完提示词或补完范文后点一次，两三分钟出结果。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: learn-bangdan
+  cancel-in-progress: true
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore pool from reports branch
+        run: |
+          set -e
+          git clone --depth 1 --branch reports \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" \
+            /tmp/pages-content
+          mkdir -p docs/x
+          cp /tmp/pages-content/x/bangdan_pool.json docs/x/ 2>/dev/null || true
+          cp /tmp/pages-content/x/bangdan_history.json docs/x/ 2>/dev/null || true
+          rm -rf /tmp/pages-content
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Distill types + writing rules
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: python3 scripts/gen_x_card.py --learn-only --site "$SITE_URL"
+
+      - name: Publish to reports branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/sync_reports_branch.py --from-dir=docs
