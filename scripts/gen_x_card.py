@@ -1228,11 +1228,15 @@ _SOPILOT_ANCHOR = re.compile(
     r'<a[^>]+href="(https://x[.]com/[^"?]+?/status/\d+)"[^>]*>(.*?)</a>', re.S)
 
 
-def _bd_full_text(tid, handle, timeout=12):
-    """按推文 id 取全文。xbangdan 的 t 字段只有 80 字，蒸馏学不到结构。"""
-    if not tid or not handle:
+def _bd_full_text(tid, handle="", timeout=12):
+    """按推文 id 取全文。xbangdan 的 t 字段只有 80 字，蒸馏学不到结构。
+
+    老条目大多没存 handle，实测 fxtwitter 只给 id 也能查到，所以 handle 可以空。
+    """
+    if not tid:
         return ""
-    url = f"https://api.fxtwitter.com/{handle}/status/{tid}"
+    url = (f"https://api.fxtwitter.com/{handle}/status/{tid}" if handle
+           else f"https://api.fxtwitter.com/status/{tid}")
     for attempt in (1, 2):
         try:
             req = urllib.request.Request(url, headers=_HEADERS)
@@ -1247,6 +1251,8 @@ def _bd_full_text(tid, handle, timeout=12):
         except Exception:        # noqa: BLE001 - 查不到就保留摘要，不能拖垮整轮
             break
 
+    if not handle:                # oEmbed 必须要 handle，没存就只能算了
+        return ""
     # fxtwitter 每 10 分钟只放行 ~75 条，超了就换成官方 oEmbed 兜底。
     # oEmbed 会把长推截到 ~280 字符，但比榜单的 80 字强得多。
     try:
@@ -2313,6 +2319,14 @@ def main():
             dups = [{"text": "同一条" * 40}, {"text": "同一条" * 60}]
             assert len(_bd_dedupe(dups + dups)) == 1, "老池子的重复没被合并"
             assert len(_bd_dedupe(dups)[0]["text"]) == 180, "重复项没留最长的那版"
+            # 补全文：只有 id、没有 handle 也要能补（老条目全都没存 handle）
+            _keep = globals()["_bd_full_text"]
+            globals()["_bd_full_text"] = lambda tid, handle="", timeout=12: "全文" * 60 if tid else ""
+            try:
+                _nofill = _bd_backfill([{"d": "2026-01-01", "text": "短" * 40, "id": "1"}], [])
+            finally:
+                globals()["_bd_full_text"] = _keep
+            assert _nofill[0]["text"].startswith("全文") and len(_nofill[0]["text"]) == 120, _nofill
             assert any(r.get("u", "").endswith("/status/9") for r in got), "没存原文链接"
             # 识别词过滤：专有名词、只出现一次的词不许留；通用信号词留下
             demo_pool = [{"text": "彩礼 反悔 " * 5}] * 3
@@ -2608,6 +2622,7 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=2000):
                 if txt and len(txt) > len(x["text"]):
                     x["text"] = txt[:cap]
         print(f"  补全文：{sum(1 for x in todo if len(x['text']) > 80)}/{len(todo)} 条")
+    pool = _bd_backfill(pool, bang, limit=60)
     keep = sorted({r["d"] for r in pool})[-_BD_POOL_DAYS:]
     pool = [r for r in pool if r["d"] in keep]
     if len(pool) > max_n:                    # 池子不能无限长：先保能学结构的全文，再按曝光
@@ -2618,34 +2633,48 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=2000):
     return pool
 
 
-def backfill_pool(out_dir, rows, limit=600):
-    """把池子里 80 字摘要换成全文。
+def _bd_backfill(pool, rows, limit=40):
+    """把 80 字摘要换成全文：有 id 就能补（只给 id 也行），没 id 的拿今天的榜单对开头。
 
-    老条目没存 id，只能拿今天的榜单按开头 60 字对；对不上的保持原样（来源已经查不到）。
-    新条目从今往后都会带 id，随时能补。
+    每轮限量：fxtwitter 大约 10 分钟放行 75 条，一口气补完只会全被 429。
     """
-    pool = _bd_pool(out_dir)
     key = lambda t: re.sub(r"\s+", "", t or "")[:60]
-    today = {}
-    for r in rows or []:
-        if r.get("id"):
-            today[key(r.get("text"))] = r
+    today = {key(r.get("text")): r for r in (rows or []) if r.get("id")}
     todo = []
     for p in pool:
         if len(p.get("text") or "") > 90:
             continue
-        tid, h = p.get("id"), p.get("h")
-        if not (tid and h):
+        if not p.get("id"):
             m = today.get(key(p.get("text")))
             if m:
-                p["id"], p["h"] = m["id"], m.get("handle") or ""
-                tid, h = p["id"], p["h"]
-        if tid and h:
-            todo.append((p, tid, h))
+                p["id"] = m["id"]
+                p["h"] = p.get("h") or m.get("handle") or ""
+        if p.get("id"):
+            todo.append(p)
     todo = todo[:limit]
     if not todo:
-        print("  没有可补的条目（缺推文 id）")
         return pool
+
+    def _work(p):
+        return p, _bd_full_text(p["id"], p.get("h") or "")
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for p, txt in ex.map(_work, todo):
+            if txt and len(txt) > len(p.get("text") or ""):
+                p["text"] = txt[:600]
+                done += 1
+    left = sum(1 for x in pool if len(x.get("text") or "") <= 90)
+    print(f"  补全文：{done}/{len(todo)} 条，池子里还剩 {left} 条摘要")
+    return pool
+
+
+def backfill_pool(out_dir, rows, limit=600):
+    """手动补全整池（命令行 --backfill）：一次最多 600 条。"""
+    pool = _bd_backfill(_bd_pool(out_dir), rows, limit)
+    (Path(out_dir) / _BD_POOL_FILE).write_text(
+        json.dumps(pool, ensure_ascii=False), encoding="utf-8")
+    return pool
 
     def _work(item):
         p, tid, h = item
