@@ -420,6 +420,11 @@ ai:
   # 也别在没 key 的时候单开 api_base，那样模型名会对不上端点。
   # x_writer_api_base: "https://api.deepseek.com"
   # x_writer_api_key: ""
+  # 今日热点精选（X 稿 + 头条稿）可以再单独一家，优先于上面 x_writer_*：
+  # 只有当 model / api_base / api_key 三行同时填好才会生效，留空就沿上面那套。
+  # xhs_writer_model: "glm-4.6"                       # 或 deepseek-chat / glm-4-plus
+  # xhs_writer_api_base: "https://open.bigmodel.cn/api/paas/v4"
+  # xhs_writer_api_key: ""
   analysis_model: "openai/glm-4-flash"      # 分析专用(与翻译同模型, 稳定不限流; 如需推理可改 glm-4.7-flash)
                                             # 推理模型适合分析/筛选等复杂判断；翻译保持用快速模型
                                     #
