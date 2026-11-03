@@ -1219,12 +1219,31 @@ def _bd_full_text(tid, handle, timeout=12):
     if not tid or not handle:
         return ""
     url = f"https://api.fxtwitter.com/{handle}/status/{tid}"
+    for attempt in (1, 2):
+        try:
+            req = urllib.request.Request(url, headers=_HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", "ignore"))
+            return ((data.get("tweet") or {}).get("text") or "").strip()
+        except urllib.error.HTTPError as exc:
+            if attempt == 1 and exc.code in (429, 500, 502, 503, 504):
+                time.sleep(3)
+                continue
+            break
+        except Exception:        # noqa: BLE001 - 查不到就保留摘要，不能拖垮整轮
+            break
+
+    # fxtwitter 每 10 分钟只放行 ~75 条，超了就换成官方 oEmbed 兜底。
+    # oEmbed 会把长推截到 ~280 字符，但比榜单的 80 字强得多。
     try:
-        req = urllib.request.Request(url, headers=_HEADERS)
+        u = "https://publish.twitter.com/oembed?" + urllib.parse.urlencode(
+            {"url": f"https://twitter.com/{handle}/status/{tid}", "omit_script": "1"})
+        req = urllib.request.Request(u, headers=_HEADERS)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", "ignore"))
-        return ((data.get("tweet") or {}).get("text") or "").strip()
-    except Exception:        # noqa: BLE001 - 查不到就保留摘要，不能拖垮整轮
+        txt = html.unescape(re.sub(r"<[^>]+>", " ", data.get("html") or ""))
+        return re.sub(r"\s+", " ", txt).strip()
+    except Exception:        # noqa: BLE001
         return ""
 
 
@@ -2278,11 +2297,11 @@ def main():
         return
 
     src = Path(args.source)
-    if not src.is_file():
-        raise SystemExit(f"找不到报告：{src}（先跑一次爬虫，或指定 --source）")
-    items = parse_items(src.read_text(encoding="utf-8", errors="ignore"))
-    if not items:
-        raise SystemExit(f"{src} 里没解析出任何条目，报告结构可能变了")
+    items = []
+    if src.is_file():
+        items = parse_items(src.read_text(encoding="utf-8", errors="ignore"))
+    if not items and not args.learn_only:
+        raise SystemExit(f"找不到/解析不出报告：{src}（先跑一次爬虫，或指定 --source）")
 
     official, gossip = split_channels(items)
     out = Path(args.out_dir)
@@ -2512,7 +2531,7 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=2000):
     if todo:
         def _work(x):
             return x, _bd_full_text(x["id"], x.get("h") or "")
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        with ThreadPoolExecutor(max_workers=4) as ex:
             for x, txt in ex.map(_work, todo):
                 if txt and len(txt) > len(x["text"]):
                     x["text"] = txt[:cap]
@@ -2561,7 +2580,7 @@ def backfill_pool(out_dir, rows, limit=600):
         return p, _bd_full_text(tid, h)
 
     done = 0
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         for p, txt in ex.map(_work, todo):
             if txt and len(txt) > len(p["text"]):
                 p["text"] = txt[:600]
