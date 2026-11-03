@@ -962,20 +962,34 @@ def _yaml_ai():
     except OSError:
         return cfg
     for key in ("api_key", "model", "api_base", "x_writer_model", "x_writer_api_base",
-                "x_writer_api_key"):
+                "x_writer_api_key", "xhs_writer_model", "xhs_writer_api_base",
+                "xhs_writer_api_key"):
         m = re.search(r"^\s*" + key + r":\s*[\"']?([^\"'\s#]+)", text, re.M)
         if m:
             cfg[key] = m.group(1).strip()
     return cfg
 
 
-def _ai_config():
+def _ai_config(role=None):
     """环境变量优先，其次 config.yaml，最后退回智谱默认。
 
     板块二可以单独接一家供应商（ai.x_writer_api_key + x_writer_api_base）：换 DeepSeek
     不用动 AI_API_KEY，爬虫自己的分析/翻译照旧，两边互不影响。
+    role="xhs" 时优先用 xhs_writer_*（今日热点精选的稿更吃模型，可以配贵一点的那家）。
     """
     y = _yaml_ai()
+    if role == "xhs":
+        xk = os.environ.get("XHS_WRITER_API_KEY", "").strip() or y.get("xhs_writer_api_key", "")
+        xb = os.environ.get("XHS_WRITER_API_BASE", "").strip() or y.get("xhs_writer_api_base", "")
+        if xk and xb:
+            xm = (os.environ.get("XHS_WRITER_MODEL", "").strip()
+                  or y.get("xhs_writer_model", "") or y.get("x_writer_model", "") or _AI_MODEL)
+            if xm.startswith("openai/"):
+                xm = xm.split("/", 1)[1]
+            print(f"  写作模型：{xm} @ {xb.split('//')[-1].split('/')[0]}（精选专属 key）")
+            return xk, xb.rstrip("/"), xm
+        if xk or xb:
+            print("  ⚠️ 精选专属 key / 端点只配了一半，这轮仍用原供应商")
     wkey = os.environ.get("X_WRITER_API_KEY", "").strip() or y.get("x_writer_api_key", "")
     wbase = os.environ.get("X_WRITER_API_BASE", "").strip() or y.get("x_writer_api_base", "")
     if wkey and wbase:
@@ -2151,6 +2165,19 @@ def main():
             os.environ.pop("X_WRITER_API_KEY", None)
             os.environ.pop("X_WRITER_API_BASE", None)
         assert pair[0] == "sk-test-only" and "deepseek" in pair[1], pair
+        # 精选稿专属：xhs_writer_* 三件套齐全才盖过 x_writer_*
+        os.environ["XHS_WRITER_MODEL"] = "glm-4.6"
+        os.environ["XHS_WRITER_API_BASE"] = "https://open.bigmodel.cn/api/paas/v4"
+        os.environ["XHS_WRITER_API_KEY"] = "sk-xhs-only"
+        try:
+            picked_cfg = _ai_config("xhs")
+            assert picked_cfg[0] == "sk-xhs-only" and picked_cfg[2] == "glm-4.6", picked_cfg
+            os.environ.pop("XHS_WRITER_API_KEY")
+            fell_back = _ai_config("xhs")          # 只留模型和端点＝不生效
+            assert fell_back[0] != "sk-xhs-only", fell_back
+        finally:
+            for _k in ("XHS_WRITER_MODEL", "XHS_WRITER_API_BASE", "XHS_WRITER_API_KEY"):
+                os.environ.pop(_k, None)
         # 只留 key（换供应商时忘了撤 Secret）不能把端点切走，否则就是 401
         os.environ["X_WRITER_API_KEY"] = "sk-test-only"
         try:
