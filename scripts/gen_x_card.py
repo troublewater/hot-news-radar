@@ -2310,6 +2310,9 @@ def main():
             _bd_pool_add(td, [{"id": "9", "handle": "a", "text": "短" * 100}])
             got = _bd_pool_add(td, [{"id": "9", "handle": "a", "text": "长" * 300}])
             assert len([r for r in got if r.get("id") == "9"]) == 1, got
+            dups = [{"text": "同一条" * 40}, {"text": "同一条" * 60}]
+            assert len(_bd_dedupe(dups + dups)) == 1, "老池子的重复没被合并"
+            assert len(_bd_dedupe(dups)[0]["text"]) == 180, "重复项没留最长的那版"
             assert any(r.get("u", "").endswith("/status/9") for r in got), "没存原文链接"
             # 识别词过滤：专有名词、只出现一次的词不许留；通用信号词留下
             demo_pool = [{"text": "彩礼 反悔 " * 5}] * 3
@@ -2317,7 +2320,7 @@ def main():
                                    demo_pool)
             assert cleaned and cleaned[0]["sign"] == ["彩礼", "反悔"], cleaned
             (Path(td) / _BD_POOL_FILE).write_text(json.dumps(
-                [{"d": f"2000-01-{d:02d}", "v": 1, "cat": "", "text": "旧" * 200}
+                [{"d": f"2000-01-{d:02d}", "v": 1, "cat": "", "text": f"{d:02d}号" + "旧" * 200}
                  for d in range(1, 16)]), encoding="utf-8")
             left = _bd_pool_add(td, [])
             assert len(left) == 14 and all(r["d"] != "2000-01-01" for r in left), left
@@ -2532,6 +2535,24 @@ def _bd_key(r):
     return r.get("id") or re.sub(r"\s+", "", r.get("text") or "")[:24]
 
 
+def _bd_dedupe(pool):
+    """把池子里已经存在的重复也合并掉：老池子是按键取前 60 字攒出来的，重复很多。
+
+    只保留最长的那版（全文优于 80 字摘要），其余字段跟着最长那版走。
+    """
+    out, idx = [], {}
+    for r in pool:
+        k = _bd_key(r)
+        if k in idx:
+            n = idx[k]
+            if len(r.get("text") or "") > len(out[n].get("text") or ""):
+                out[n] = r
+            continue
+        idx[k] = len(out)
+        out.append(r)
+    return out
+
+
 def _bd_pool(out_dir):
     """读范文池：累积的爆款原文，跨天去重。读不到就是第一次跑。"""
     try:
@@ -2553,7 +2574,7 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=2000):
     """
     now = now or datetime.now()
     day = f"{now:%Y-%m-%d}"
-    pool = _bd_pool(out_dir)
+    pool = _bd_dedupe(_bd_pool(out_dir))
     idx = {}
     for n, r in enumerate(pool):
         idx.setdefault(_bd_key(r), n)
