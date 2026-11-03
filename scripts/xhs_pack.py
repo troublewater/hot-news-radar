@@ -375,9 +375,14 @@ _OG_TAG = re.compile(r"<meta\b[^>]*>", re.I)
 _OG_KEYS = ("og:image", "twitter:image")
 
 
+# 站点自己的 logo / 头像 / 占位图一律不要：热榜页里这些比正文图还多，
+# 混进来就是「图裂」和「配了张无关的图」。
 _IMG_SKIP = re.compile(
-    r"logo|icon|avatar|emoji|qrcode|qr_|placeholder|default|blank|spacer|/static/|loading", re.I)
-_IMG_OK = re.compile(r"blogfile|upload|article|content|photo|/202[0-9]/|/news/|/p/", re.I)
+    r"logo|icon|avatar|gravatar|emoji|qrcode|qr_|placeholder|default|blank|spacer|static|"
+    r"header-image|def_man|badge|sprite|loading|advert|banner|ads?/", re.I)
+# 只认「上传目录」里的正文图；认不出就不配图，宁缺毋滥
+_IMG_OK = re.compile(
+    r"blogfile|newspost|upload|article|content|photo|/pai/|/image/|/202[0-9]/|/news/", re.I)
 _BLOCK = re.compile(r"(?is)<(script|style|noscript|svg|head)[^>]*>.*?</\1>")
 
 
@@ -397,19 +402,22 @@ def _img_from(page):
         if not any(k in tag for k in _OG_KEYS):
             continue
         m = re.search(r'content=["\']([^"\']+)', tag, re.I)
-        if m and m.group(1).startswith("http"):
-            return m.group(1)
-    best = ""
-    for src in re.findall(r'<img[^>]+(?:data-src|data-original|src)=["\']([^"\']+)', page, re.I):
+        if m:
+            src = html.unescape(m.group(1))
+            if src.startswith("http") and not _IMG_SKIP.search(src):
+                return src
+    for raw in re.findall(r'<img[^>]+(?:data-src|data-original|src)=["\']([^"\']+)', page, re.I):
+        src = html.unescape(raw)
         if src.startswith("//"):
             src = "https:" + src
         if not src.startswith("http") or _IMG_SKIP.search(src):
             continue
+        wh = re.search(r"_w_(\d+)_h_(\d+)", src)
+        if wh and int(wh.group(1)) < 300 and int(wh.group(2)) < 300:
+            continue                      # 缩略图/头像，撑不起封面
         if _IMG_OK.search(src):
             return src
-        if not best and not re.search(r"\.(gif|svg)(\?|$)", src, re.I):
-            best = src
-    return best
+    return ""
 
 
 def _text_from(page):
@@ -446,7 +454,8 @@ def render_pack(picked, wrote, site, handle="", now=None):
         it = row["item"]
         orig = it.get("orig") or ""
         # 没图就不留空列：10 条里通常一条图都没有，那个 300px 的空档太显眼
-        pic = (f'<div class="cov"><img src="{html.escape(orig)}" alt="原贴配图" loading="lazy"></div>'
+        pic = (f'<div class="cov"><img src="{html.escape(orig)}" alt="原贴配图" '
+               f'referrerpolicy="no-referrer" loading="lazy"></div>'
                if orig else "")
         nopic = "" if orig else '<div class="why">原贴没给配图</div>' 
         w = by_i.get(n) or {}
