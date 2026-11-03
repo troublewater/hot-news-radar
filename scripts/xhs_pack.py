@@ -583,6 +583,7 @@ def main():
     ap.add_argument("--top", type=int, default=30)
     ap.add_argument("--handle", default="")
     ap.add_argument("--no-ai", action="store_true")
+    ap.add_argument("--no-push", action="store_true", help="不推飞书（本地试跑用）")
     ap.add_argument("--no-bangdan", action="store_true")
     ap.add_argument("--explain", action="store_true", help="打印每条的得分理由")
     ap.add_argument("--selftest", action="store_true")
@@ -650,7 +651,10 @@ def main():
     print(f"图文包：{out/'pack.html'}")
     # 没出正文也照推：不然你那边一整天静悄悄，还以为是流水线挂了
     if picked:
-        push_feishu(args.site, len(picked), picked[0]["item"]["title"], got, bool(wrote))
+        if not args.no_push:
+            push_feishu(args.site, len(picked), picked[0]["item"]["title"], got, bool(wrote))
+        else:
+            print("  已跳过飞书推送（--no-push）")
 
 
 if __name__ == "__main__":
