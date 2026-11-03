@@ -39,7 +39,18 @@ jobs:
           SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: python3 scripts/gen_x_card.py --learn-only --site "$SITE_URL"
 
-      - name: Publish to reports branch
+      - name: Publish x/ to reports branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python3 scripts/sync_reports_branch.py --from-dir=docs
+        run: |
+          set -e
+          git clone --depth 1 --branch reports \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" \
+            /tmp/pub
+          cp -r docs/x/. /tmp/pub/x/
+          cd /tmp/pub
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add x
+          git diff --cached --quiet || git commit -m "chore(bangdan): refresh types + writing rules"
+          git push origin reports
