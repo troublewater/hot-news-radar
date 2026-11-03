@@ -226,38 +226,19 @@ jobs:
       # 产物落在 docs/x/ 下，会跟着下面的 Sync 步骤一起上线到 reports 分支，
       # 因此卡片图的公网地址恒为 <站点>/x/card.png
       # 同一个文件每轮覆盖，不按日期堆积（按日期存一年会长到几百 MB）。
-      - name: Generate X card
+      # ── 只学爆款池：更新范文池 / 内容类型 / 热榜链接 / hooksupdate.md ──────
+      # 卡片图和板块二文案已停（用户 2026-11 决定不再出卡），这里只保留学习链路，
+      # 今日热点精选靠它拿当天的类型规则。
+      - name: Learn bangdan (no card)
         if: success()
         env:
           SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
           set -e
           mkdir -p docs/x
-          python3 scripts/gen_x_card.py --site "$SITE_URL"
-          # 中文字体：runner 镜像只装了 fonts-noto-color-emoji，没有任何 CJK 字体，
-          # 不装的话卡片上的中文全是方框（tofu）。
-          if ! fc-list :lang=zh 2>/dev/null | grep -q .; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq fonts-noto-cjk
-          fi
-          CHROME=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)
-          if [ -z "$CHROME" ]; then echo "❌ 找不到 Chrome，无法截图"; exit 1; fi
-          # 不要加 --in-process-gpu：无头容器里它会让 Chrome 直接 SIGTRAP
-          # 崩掉（Trace/breakpoint trap / exit 133），那是本地沙箱才需要的参数。
-          "$CHROME" --headless=new --disable-gpu --no-sandbox --disable-dev-shm-usage \
-            --hide-scrollbars --force-device-scale-factor=2 \
-            --user-data-dir="$RUNNER_TEMP/chrome-x" \
-            --window-size=1200,1500 --virtual-time-budget=5000 \
-            --screenshot="$PWD/docs/x/card.png" "file://$PWD/docs/x/card.html"
-          # Chrome 自己挂了的话，set -e 会把它的退出码带到日志里（上面那次是 133），
-          # 能走到这里说明 Chrome 说成功但没写出图。
-          test -s docs/x/card.png || { echo "❌ 卡片截图失败：Chrome 说成功但没写出 PNG"; exit 1; }
+          python3 scripts/gen_x_card.py --site "$SITE_URL" --learn-only
           ls -lh docs/x/
 
-      # ── 今日热点精选（原名「小红书图文包」）─────────────────────────
-      # 产物 docs/xhs/ 跟着下面的 Sync 步骤上线，链接推飞书。
-      # 配图只用原贴的 og:image：热榜链多是搜索页/列表页，抓不到就不配图，
-      # 不生成替代图（所以这里也不再跑 Chrome 截图）。
       - name: Build daily picks pack
         if: success()
         continue-on-error: true
@@ -266,7 +247,7 @@ jobs:
         run: |
           set -e
           python3 scripts/xhs_pack.py --source docs/reports/latest/current.html \
-            --out-dir docs/xhs --top 10 --site "$SITE_URL"
+            --out-dir docs/xhs --top 30 --site "$SITE_URL"
           ls -lh docs/xhs/
 
       # ── 侦察：runner（美国）能不能直连中文站点 ───────────────
@@ -307,14 +288,6 @@ jobs:
           path: .x-push-state
           key: x-push-${{ github.run_id }}
           restore-keys: x-push-
-
-      - name: Notify X card to Feishu
-        if: success()
-        env:
-          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-          SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
-          FORCE_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
-        run: python3 scripts/notify_x_card.py --site "$SITE_URL" $FORCE_FLAG
 
       - name: Save push marker
         # 没推成、没写过记录时这个文件不存在，存缓存会报错，所以先判一下
