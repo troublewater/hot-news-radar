@@ -2727,15 +2727,16 @@ _SKILL_SYSTEM = """你在拆解一批中文 X 爆款正文，目标是给写作�
 }
 
 要求：
-- structures 3~5 个，share 是占比；skeleton 用「/」分段，4~6 段
-- hooks 5~8 个：kind 是钩子类型，pattern 必须是**能直接套用的中文句式**
+- structures 3 个，share 是占比；skeleton 用「/」分段，4~6 段
+- hooks 5 个：kind 是钩子类型，pattern 必须是**能直接套用的中文句式**
   （如「都以为A，结果B」「一个细节，把X说明白了」），example 摘原文第一句
-- patterns 5~8 个：必须是中文连接/修辞模板（如「不是A，而是B」「嘴上A，转头就B」
+- patterns 5 个：必须是中文连接/修辞模板（如「不是A，而是B」「嘴上A，转头就B」
   「A到这种程度，已经不是B了」），每条附 example。**禁止出现 XXX、…… 这类占位符**
 - length 按样本真实分布给整数
-- rules 5~8 条：必须可检查（如「开头第一句不超过 25 字」「每条 3~5 段」
+- example 每条不超过 30 字，整份 JSON 控制在 2000 字以内
+- rules 5 条：必须可检查（如「开头第一句不超过 25 字」「每条 3~5 段」
   「结尾落在具体动作或数字上」）。**禁止「语言生动」「逻辑清晰」这类空话**
-- topics 5~8 个：必须是**带张力的角度**（如「钱给到位了，人却反悔」），
+- topics 5 个：必须是**带张力的角度**（如「钱给到位了，人却反悔」），
   不许写成「科技热点」「娱乐八卦」这种频道名
 只输出 JSON，不要解释、不要 ``` 包裹。"""
 
@@ -2763,15 +2764,22 @@ def learn_skill(out_dir, pool, now=None, sample=30):
     body = "\n\n".join(f"[{n}] {r['text'][:700]}" for n, r in enumerate(rows, 1))
     text = _ai_call(key, base, model, _SKILL_SYSTEM,
                     f"这批是 X 中文区跑得动的爆款，共 {len(rows)} 篇：\n\n{body}")
-    start = (text or "").find("{")
+    text = text or ""
+    start = text.find("{")
     skill = {}
     if start >= 0:
         try:
-            skill = json.loads(text[start:])
+            skill, _ = json.JSONDecoder().raw_decode(text[start:])
         except ValueError:
-            skill = {}
+            end = text.rfind("}")
+            if end > start:
+                try:
+                    skill = json.loads(text[start:end + 1])
+                except ValueError:
+                    skill = {}
     if not isinstance(skill, dict) or not skill.get("structures"):
-        print("  ⚠️ 写作规则没蒸馏出来，这轮只用类型")
+        print("  ⚠️ 写作规则没蒸馏出来，这轮只用类型"
+              + ("｜模型开头：" + " ".join(text[:120].split()) if text else ""))
         return old or {}
     path.write_text(json.dumps({"d": f"{now:%Y-%m-%d}", "v": _SKILL_V, "n": len(pool),
                                 "skill": skill}, ensure_ascii=False), encoding="utf-8")
