@@ -211,7 +211,9 @@ _XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。**写法不�
 
 格式：
 - 标题 <= 20 字，要有情绪 / 悬念 / 数字，可以带 1~2 个 emoji。
-- 正文拆成 3~5 段放进 paras；有原文摘录就写到 250~450 字，没有摘录就 150~250 字，别靠编细节凑长度。
+- paras 必须 3~5 段，**每段 60~110 字**（整条 200~450 字）。每段是一个完整场景/动作，
+  不是一句话；有原文摘录就按摘录铺开，没有摘录就 150~250 字，别靠编细节凑长度。
+- 结尾必须是陈述句，不许提问。
 - 结尾单独一行给 6~10 个话题标签，纯词，不要 # 号。
 - 全角标点；引号一律「」；不要英文引号。
 
@@ -219,7 +221,7 @@ _XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。**写法不�
 [{"i": 1, "title": "标题", "paras": ["第一段", "第二段"], "tags": ["话题1", "话题2"]}]"""
 
 
-def _xhs_prompt(picked, fp, types=None, stats=None):
+def _xhs_prompt(picked, fp, types=None, stats=None, skill=None):
     user = ["今天 X 中文区跑得动的爆款风向（照这个口味写，人和事必须是新的）：",
             "- 跑得动的开头类型：" + "、".join(gx._bd_named(fp.get("hooks", []), 5)),
             "- 跑得动的风格：" + "、".join(gx._bd_named(fp.get("styles", []), 4, skip="其他")),
@@ -228,6 +230,26 @@ def _xhs_prompt(picked, fp, types=None, stats=None):
         user += ["", "今天从范文池总结出来的内容类型（写法照对应那一条，别自己发明招式）："]
         user += [f"- {t['name']}：{t.get('desc', '')}｜写法：{t.get('how', '')}"
                  for t in types[:10]]
+    if skill:
+        # 这份是当天从整池范文蒸馏出来的「怎么写」，比只给类型更具体
+        user += ["", "今天从范文池蒸馏出来的写法（结构/钩子/句型照这个来，别自己发明）："]
+        for st in (skill.get("structures") or [])[:3]:
+            share = f"（占 {round((st.get('share') or 0) * 100)}%）" if st.get("share") else ""
+            user.append(f"- 骨架「{st.get('name')}」{st.get('skeleton')}{share}")
+        hk = "；".join(f"{h.get('kind')}：{h.get('pattern')}"
+                       for h in (skill.get("hooks") or [])[:5] if h.get("pattern"))
+        if hk:
+            user.append("- 开头钩子：" + hk)
+        pt = "；".join(x.get("pattern") for x in (skill.get("patterns") or [])[:5]
+                       if x.get("pattern"))
+        if pt:
+            user.append("- 高频句型：" + pt)
+        ln = skill.get("length") or {}
+        if ln.get("median"):
+            user.append(f"- 篇幅：中位 {ln['median']} 字 / {ln.get('paras') or 3} 段左右")
+        rl = [str(x) for x in (skill.get("rules") or [])[:5] if str(x).strip()]
+        if rl:
+            user.append("- 硬规则：" + "；".join(rl))
     if stats:
         user += ["", f"- 正文规模按 {stats['len']} 字上下写，别写成一行一行的碎片"]
     user += ["", "有原文摘录的条目，只用摘录里写明的事展开；没有摘录的只按标题写，宁可短，不许补细节。",
@@ -294,23 +316,24 @@ def _xhs_parse(text):
     return out
 
 
-def xhs_write(picked, fp, now=None, types=None, stats=None):
+def xhs_write(picked, fp, now=None, types=None, stats=None, skill=None):
     """交给模型写小红书文案。返回 [{i,title,body,tags}]，拿不到就返回空。"""
     key, base, model = gx._ai_config()
     if not key:
         print("  ⚠️ 没配 AI key，跳过二创，这轮只出筛选结果和封面")
         return []
-    got, last = [], ""
+    got, best, last = [], {}, ""
     # 分小批写：一次要 10 条长正文容易撞输出上限，也被限流一枪打死整批。
     for k in range(0, len(picked), _XHS_BATCH):
         chunk = picked[k:k + _XHS_BATCH]
         # 每条能拿来核对的「原文」只有热榜标题（原贴正文抓不到），查编造的名字就靠它
         src_of = {k + j + 1: r["item"]["title"] + "\n" + (r["item"].get("excerpt") or "")
                   for j, r in enumerate(chunk)}
-        prompt, part = _xhs_prompt(chunk, fp, types, stats), []
+        prompt, part = _xhs_prompt(chunk, fp, types, stats, skill), []
+        note = ""
         # 模型十次里有几次只交一半（实测 5 条只回 1 条），再要一次基本就补齐了
         for _attempt in (1, 2):
-            last = gx._ai_call(key, base, model, _XHS_SYSTEM, prompt)
+            last = gx._ai_call(key, base, model, _XHS_SYSTEM, prompt + note)
             have = {x["i"] for x in part}
             for x in _xhs_parse(last):
                 x["i"] += k                  # 分批后编号要从整批的序号起算
@@ -320,11 +343,21 @@ def xhs_write(picked, fp, now=None, types=None, stats=None):
                 if bad:                      # 题面里没这个人，是模型自己编的，宁可不要这条
                     print("     ⚠️ 丢掉一条：里头有原文没写的名字 " + "/".join(bad))
                     continue
-                part.append(x)
-            # 只在「交了一半」时补要一次：整批为空基本是限流/超时，
-            # 再要一次等于把 180 秒的等待翻倍（实测能把一个步骤拖到 40 分钟）
-            if len(part) >= len(chunk) or not part:
+                if len(x["body"]) > len(best.get(x["i"], {}).get("body", "")):
+                    best[x["i"]] = x         # 留最长的一版兜底
+                if len(x["body"]) >= 120 and not x["body"].rstrip().endswith(("？", "?")):
+                    part.append(x)
+                # 太短 / 问句收尾的算没交，逼模型补写
+            # 整批为空且模型没回内容，多半是限流/超时，再要一次只是白等
+            if len(part) >= len(chunk) or not (last or "").strip():
                 break
+            note = ("\n\n上一版太短（有的只有一两句）或用问句收尾。这次每条必须 200 字以上、"
+                    "3~5 段、每段 60~110 字，结尾用陈述句，不许提问。")
+        # 补不齐就用写过最长的那版兜底，别让整条消失
+        have = {x["i"] for x in part}
+        for n in range(k + 1, k + 1 + len(chunk)):
+            if n not in have and n in best:
+                part.append(best[n])
         print(f"    第 {k // _XHS_BATCH + 1} 批：{len(chunk)} 条 -> 成稿 {len(part)} 条")
         got += part
     print(f"  AI 二创：{len(picked)} 条 -> 成稿 {len(got)} 条")
@@ -580,16 +613,18 @@ def main():
 
     pool = gx._bd_pool(Path(args.out_dir).parent / "x")
     stats = gx.bangdan_stats(pool)
+    skill = gx.load_skill(Path(args.out_dir).parent / "x")
     print(f"  范文池累积 {len(pool)} 篇"
           + (f"，规模中位 {stats['len']} 字" if stats else "")
-          + f"；按 {len(types)} 类内容类型匹配")
+          + f"；按 {len(types)} 类内容类型匹配"
+          + ("，写法规则已载入" if skill else ""))
     # 先把原文/配图抓回来：写作靠它撑篇幅，页面靠它配图（10 条并发，只花最长一条的时间）
     with ThreadPoolExecutor(max_workers=6) as pool:
         arts = list(pool.map(lambda r: fetch_article(r["item"]["url"]), picked))
     for row, art in zip(picked, arts):
         row["item"]["orig"] = art["img"]
         row["item"]["excerpt"] = art["text"]
-    wrote = [] if args.no_ai else xhs_write(picked, fp, types=types, stats=stats)
+    wrote = [] if args.no_ai else xhs_write(picked, fp, types=types, stats=stats, skill=skill)
     got = sum(1 for r in picked if r["item"].get("orig"))
     print(f"  原贴配图：{got}/{len(picked)} 条有（热榜链大多是搜索页，没有就不配图）")
     out = Path(args.out_dir)
