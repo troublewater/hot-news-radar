@@ -2642,8 +2642,8 @@ def _bd_backfill(pool, rows, limit=40):
     today = {key(r.get("text")): r for r in (rows or []) if r.get("id")}
     todo = []
     for p in pool:
-        if len(p.get("text") or "") > 90:
-            continue
+        if len(p.get("text") or "") > 90 or p.get("s"):
+            continue          # s=查过了，原文本来就短，别每轮再烧一次请求
         if not p.get("id"):
             m = today.get(key(p.get("text")))
             if m:
@@ -2664,6 +2664,8 @@ def _bd_backfill(pool, rows, limit=40):
             if txt and len(txt) > len(p.get("text") or ""):
                 p["text"] = txt[:600]
                 done += 1
+            elif txt:
+                p["s"] = 1
     left = sum(1 for x in pool if len(x.get("text") or "") <= 90)
     print(f"  补全文：{done}/{len(todo)} 条，池子里还剩 {left} 条摘要")
     return pool
