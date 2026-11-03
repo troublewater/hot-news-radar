@@ -2438,20 +2438,25 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=1200):
     now = now or datetime.now()
     day = f"{now:%Y-%m-%d}"
     pool = _bd_pool(out_dir)
-    seen = {r["text"][:80] for r in pool}
+    idx = {r["text"][:60]: n for n, r in enumerate(pool)}
     for r in bang or []:
         t = re.sub(r"\n{2,}", "\n", (r.get("text") or "").strip())
         if len(t) < 60:                      # 单句 / 转发型短帖学不到写法
             continue
-        if t[:80] in seen:
+        k = t[:60]
+        if k in idx:                         # 同一篇又来了：榜单摘要只有 80 字，
+            n = idx[k]                       # 拿更长的全文换掉它，范文才有结构可学
+            if len(t) > len(pool[n]["text"]):
+                pool[n]["text"] = t[:cap]
             continue
-        seen.add(t[:80])
+        idx[k] = len(pool)
         pool.append({"d": day, "v": r.get("v") or 0, "cat": r.get("cat") or "",
                      "text": t[:cap]})
     keep = sorted({r["d"] for r in pool})[-_BD_POOL_DAYS:]
     pool = [r for r in pool if r["d"] in keep]
-    if len(pool) > max_n:                    # 只留曝光高的，池子不能无限长
-        pool = sorted(pool, key=lambda r: -(r.get("v") or 0))[:max_n]
+    if len(pool) > max_n:                    # 池子不能无限长：先保能学结构的全文，再按曝光
+        pool = sorted(pool, key=lambda r: (len(r["text"]) >= 120, r.get("v") or 0),
+                      reverse=True)[:max_n]
     (Path(out_dir) / _BD_POOL_FILE).write_text(
         json.dumps(pool, ensure_ascii=False), encoding="utf-8")
     return pool
@@ -2523,7 +2528,7 @@ def learn_types(out_dir, pool, now=None, sample=24):
     if (isinstance(data, dict) and data.get("d") == f"{now:%Y-%m-%d}"
             and data.get("v") == _TYPES_V and old):
         return old                        # 一天几十轮，当天算过就不再调模型
-    rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 120),
+    rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 60),
                   key=lambda r: -(r.get("v") or 0))
     # 取样要铺开：只取曝光最高那几条，全挤在同一个热点上，总结出来就是「具体事件」不是类型
     rows = rows[::max(1, len(rows) // sample)][:sample]
@@ -2558,7 +2563,7 @@ def bangdan_stats(pool):
     这几个数是每天从池子里现算的，风向变了它跟着变，不是写死的模板。
     """
     txt = [r["text"].strip() for r in (pool or []) if len(r.get("text") or "") >= 120]
-    if not txt:
+    if not txt:                              # 只剩 80 字榜单摘要时算不出「写多长」，别拿去误导写作
         return {}
     # 只算字数：池子里的原文是抓来的整块文本，段落早被压平了，数段数只会得出「1 段」
     lens = sorted(len(t) for t in txt)
