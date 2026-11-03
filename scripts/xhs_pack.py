@@ -214,11 +214,18 @@ _XHS_SYSTEM = """你在给一个中文社媒账号写热点短评。**写法不�
 - paras 必须 3~5 段，**每段 60~110 字**（整条 200~450 字）。每段是一个完整场景/动作，
   不是一句话；有原文摘录就按摘录铺开，没有摘录就 150~250 字，别靠编细节凑长度。
 - 结尾必须是陈述句，不许提问。
-- 结尾单独一行给 6~10 个话题标签，纯词，不要 # 号。
+- 结尾的 tags 只放 6~10 个话题词，纯词，不要 # 号。
 - 全角标点；引号一律「」；不要英文引号。
 
+同一条还要给一份头条版（tt_*），跟 X 版分开写，别直接照搬：
+- tt_title <= 30 字，不带 emoji、不带 #、不用「破防/笑死」这种网感词，像正经稿子的标题。
+- tt_body 300~600 字、3~5 段：先讲清发生了什么（谁、在哪、做了什么、结果），最后一段给一句落点，
+  可以带观点，但别喊口号、别提问、别编原文没有的人名细节。
+- 全角标点，引号一律「」。
+
 只输出 JSON 数组，按输入的编号顺序，不要解释、不要 ``` 包裹：
-[{"i": 1, "title": "标题", "paras": ["第一段", "第二段"], "tags": ["话题1", "话题2"]}]"""
+[{"i": 1, "title": "标题", "paras": ["第一段", "第二段"], "tags": ["话题1", "话题2"],
+  "tt_title": "头条标题", "tt_body": "头条正文，段落之间空一行"}]"""
 
 
 def _xhs_prompt(picked, fp, types=None, stats=None, skill=None):
@@ -310,15 +317,18 @@ def _xhs_parse(text):
                 idx = int(it.get("i") or n)
             except (TypeError, ValueError):
                 idx = n
+            tt = str(it.get("tt_body") or "").strip()
             out.append({"i": idx, "title": gx._normalize_quotes(title),
                         "body": "\n\n".join(gx._normalize_quotes(x) for x in paras),
-                        "tags": tags})
+                        "tags": tags,
+                        "tt_title": gx._normalize_quotes(str(it.get("tt_title") or "").strip()),
+                        "tt_body": gx._normalize_quotes(tt) if tt else ""})
     return out
 
 
 def xhs_write(picked, fp, now=None, types=None, stats=None, skill=None):
     """交给模型写小红书文案。返回 [{i,title,body,tags}]，拿不到就返回空。"""
-    key, base, model = gx._ai_config()
+    key, base, model = gx._ai_config("xhs")
     if not key:
         print("  ⚠️ 没配 AI key，跳过二创，这轮只出筛选结果和封面")
         return []
@@ -463,6 +473,15 @@ def render_pack(picked, wrote, site, handle="", now=None):
         body = w.get("body") or "（这轮没调模型，只有筛选结果；配上 AI key 再跑一次就有正文）"
         tags = w.get("tags") or []
         tagline = " ".join("#" + re.sub(r"\s+", "", t).lstrip("#") for t in tags)
+        # 今日头条没有公开发帖 API，只能给一份可复制的稿 + 发布页链接
+        tt = ""
+        if w.get("tt_body"):
+            ttext = (w.get("tt_title") or title) + "\n\n" + w["tt_body"]
+            tt = f"""<details class="tt"><summary>头条版（复制即发）</summary>
+      <pre class="body" id="tt{n}">{html.escape(ttext)}</pre>
+      <button class="cp" data-for="tt{n}" type="button">复制头条文案</button>
+      <a href="https://mp.toutiao.com/profile_v4/graphic/publish" target="_blank" rel="noreferrer">打开头条发布页</a>
+    </details>"""
         cards.append(f"""<section class="card">
   {pic}
   <div class="txt">
@@ -472,6 +491,7 @@ def render_pack(picked, wrote, site, handle="", now=None):
     <pre class="body">{html.escape(body)}</pre>
     <div class="tags">{html.escape(tagline)}</div>
     <div class="xpost"><a href="{html.escape(x_intent(title, w.get('body') or ''))}" target="_blank" rel="noreferrer">🐦 一键发 X</a></div>
+    {tt}
     <div class="src">原文：<a href="{html.escape(it['url'])}" rel="noreferrer">{html.escape(it['url'][:90])}</a></div>
     <div class="why">{html.escape('｜'.join(row['why']))}</div>
     {nopic}
@@ -498,11 +518,28 @@ def render_pack(picked, wrote, site, handle="", now=None):
         background:#1d9bf0;color:#fff;text-decoration:none;font-size:14px;font-weight:600}}
  .src{{font-size:12px;color:#7f7f8c;word-break:break-all;margin-bottom:6px}}
  .why{{font-size:12px;color:#66d9a0}}
+ details.tt{{margin:8px 0 14px;border:1px solid #2a2a33;border-radius:10px;padding:10px 12px}}
+ details.tt summary{{cursor:pointer;font-size:13px;color:#9a9aa6}}
+ details.tt pre{{margin:10px 0;font-size:13px;line-height:1.8}}
+ .cp{{padding:6px 14px;border-radius:999px;border:1px solid #3a3a46;background:#242430;
+      color:#e9e9ef;font-size:13px;cursor:pointer;margin-right:12px}}
  a{{color:#6ec1ff}}
 </style></head><body>
 <header><h1>今日热点精选 · {now:%m-%d}（{len(picked)} 条）</h1>
 <div class="sub">标题 + 正文 + 话题 + 原贴链接，一条一条照着发即可。{'@' + handle if handle else ''}</div></header>
-<div class="wrap">{''.join(cards)}</div></body></html>"""
+<div class="wrap">{''.join(cards)}</div>
+<script>
+document.querySelectorAll('button.cp').forEach(function (b) {{
+  b.onclick = function () {{
+    var pre = document.getElementById(b.dataset.for);
+    if (!pre) return;
+    navigator.clipboard.writeText(pre.textContent).then(function () {{
+      b.textContent = '已复制';
+      setTimeout(function () {{ b.textContent = '复制头条文案'; }}, 1500);
+    }});
+  }};
+}});
+</script></body></html>"""
 
 
 def push_feishu(site, n, first_title, with_pic=0, with_text=True):
@@ -516,7 +553,7 @@ def push_feishu(site, n, first_title, with_pic=0, with_text=True):
     # 首行固定带「热点」：飞书自定义机器人的关键词校验靠它过
     content = "\n".join([
         f"📮 今日热点精选（{n} 条）", "",
-        ("标题 + 正文 + 话题 + 原贴配图链接都排好了，点开照着发："
+        ("标题 + 正文 + 话题 + 头条版都排好了，点开照着发："
          if with_text else
          "这轮写作模型被限流（429），只出了选题、没出正文，点开先看选题："),
         f"[📕 打开今日热点精选]({site}/xhs/pack.html)",
@@ -552,12 +589,15 @@ def selftest():
     assert "备选（没有故事相）" in picked[1]["why"], picked[1]
     assert len(picked) == 2
     picked[0]["item"]["orig"] = "https://e.com/p.jpg"
-    page = render_pack(picked, [{"i": 1, "title": "标题", "body": "正文", "tags": ["a"]}],
+    page = render_pack(picked, [{"i": 1, "title": "标题", "body": "正文", "tags": ["a"],
+                                 "tt_title": "头条标题", "tt_body": "头条正文"}],
                        "https://example.com")
     assert 'src="https://e.com/p.jpg"' in page and "标题" in page
     assert "原贴没给配图" in page, "没有原图的那条不该配图"
     assert "cov nopic" not in page, "没图的条目不该留空列"
-    assert "<script" not in page, "转义没做"
+    assert page.count("<script") == 1, "页面只该有自己那段复制脚本"
+    assert "头条版（复制即发）" in page and "头条正文" in page, "头条版没出来"
+    assert 'id="tt2"' not in page, "没写头条版的那条不该有复制块"
     # 一键发 X：每条都挂上，且 URL 里的换行/引号都编过码
     assert page.count("x.com/intent/post") == 2, "两条都该有发帖链接"
     assert " " not in x_intent("标题", "第一段\n\n第二段").split("text=")[1]
