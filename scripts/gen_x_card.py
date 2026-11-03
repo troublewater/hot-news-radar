@@ -2455,7 +2455,7 @@ def _bd_pool(out_dir):
     return [r for r in data if isinstance(r, dict) and r.get("text")]
 
 
-def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=1200):
+def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=2000):
     """把今天抓到的爆款原文并进范文池，返回合并后的池子。
 
     和 bangdan_history.json 分工不同：history 每天只存统计（哪个钩子各多少条），
@@ -2516,6 +2516,27 @@ _TYPES_SYSTEM = """你在给一个中文社媒热点账号做选题分析。看�
 [{"name": "..", "desc": "..", "sign": [".."], "hot": 0.2}]"""
 
 
+def _pool_sample(pool, sample=30, days=7):
+    """按天滚动取样：只看最近 N 天，每天取同样多。
+
+    池子会越攒越大，但「怎么写」是会过时的——只喂 14 天前的范文，学出来的
+    是上个版本的写法。按天配额还能防止某一天的爆款（同一个事件）占满样本。
+    """
+    by = {}
+    for r in pool or []:
+        if len(r.get("text") or "") >= 60:
+            by.setdefault(r.get("d") or "", []).append(r)
+    keep = sorted(by)[-days:]
+    if not keep:
+        return []
+    per = max(2, sample // len(keep))
+    out = []
+    for d in keep:
+        rows = sorted(by[d], key=lambda r: -(r.get("v") or 0))
+        out += rows[::max(1, len(rows) // per)][:per]
+    return out[:sample]
+
+
 def match_types(title, types):
     """这条新闻撞上了哪几类内容类型，热的排前面。
 
@@ -2555,10 +2576,7 @@ def learn_types(out_dir, pool, now=None, sample=24):
     if (isinstance(data, dict) and data.get("d") == f"{now:%Y-%m-%d}"
             and data.get("v") == _TYPES_V and old):
         return old                        # 一天几十轮，当天算过就不再调模型
-    rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 60),
-                  key=lambda r: -(r.get("v") or 0))
-    # 取样要铺开：只取曝光最高那几条，全挤在同一个热点上，总结出来就是「具体事件」不是类型
-    rows = rows[::max(1, len(rows) // sample)][:sample]
+    rows = _pool_sample(pool, sample)
     key, base, model = _ai_config()
     if len(rows) < 5 or not key:
         return old or []
@@ -2588,7 +2606,7 @@ def learn_types(out_dir, pool, now=None, sample=24):
 
 _BD_SKILL_FILE = "bangdan_skill.json"    # 从范文池蒸馏出来的「怎么写」规则
 
-_SKILL_V = 1
+_SKILL_V = 2
 
 _SKILL_SYSTEM = """你在拆解一批中文 X 爆款正文，目标是给写作模型一份「照着写就能像」的规则。
 
@@ -2597,7 +2615,7 @@ _SKILL_SYSTEM = """你在拆解一批中文 X 爆款正文，目标是给写作�
 {
  "structures": [{"name": "四段反转", "skeleton": "冲突开场/交代代价/一句反转/冷落点", "share": 0.35, "example": "摘一句原文"}],
  "hooks": [{"kind": "质问", "pattern": "凭什么…", "example": "原文第一句"}],
- "patterns": [{"pattern": "不是…而是…", "why": "制造反差"}],
+ "patterns": [{"pattern": "不是A，而是B", "why": "先否后立，制造反转", "example": "原文里的一句"}],
  "length": {"min": 120, "median": 260, "max": 900, "paras": 4},
  "rules": ["开头三行内必须出现具体代价或数字", "结尾不要问句"],
  "topics": [{"name": "金钱账本", "angle": "把金额摊开算给人看"}]
@@ -2605,11 +2623,15 @@ _SKILL_SYSTEM = """你在拆解一批中文 X 爆款正文，目标是给写作�
 
 要求：
 - structures 3~5 个，share 是占比；skeleton 用「/」分段，4~6 段
-- hooks 5~8 个，pattern 是能套到别的事上的句式，不是具体事件
-- patterns 5~8 个
+- hooks 5~8 个：kind 是钩子类型，pattern 必须是**能直接套用的中文句式**
+  （如「都以为A，结果B」「一个细节，把X说明白了」），example 摘原文第一句
+- patterns 5~8 个：必须是中文连接/修辞模板（如「不是A，而是B」「嘴上A，转头就B」
+  「A到这种程度，已经不是B了」），每条附 example。**禁止出现 XXX、…… 这类占位符**
 - length 按样本真实分布给整数
-- rules 5~8 条，必须能从样本里看出来的硬规则（开头、字数、分段、收尾、标点、禁忌）
-- topics 5~8 个选题方向
+- rules 5~8 条：必须可检查（如「开头第一句不超过 25 字」「每条 3~5 段」
+  「结尾落在具体动作或数字上」）。**禁止「语言生动」「逻辑清晰」这类空话**
+- topics 5~8 个：必须是**带张力的角度**（如「钱给到位了，人却反悔」），
+  不许写成「科技热点」「娱乐八卦」这种频道名
 只输出 JSON，不要解释、不要 ``` 包裹。"""
 
 
@@ -2629,9 +2651,7 @@ def learn_skill(out_dir, pool, now=None, sample=30):
     if (isinstance(data, dict) and data.get("d") == f"{now:%Y-%m-%d}"
             and data.get("v") == _SKILL_V and old):
         return old
-    rows = sorted((r for r in (pool or []) if len(r.get("text") or "") >= 60),
-                  key=lambda r: -(r.get("v") or 0))
-    rows = rows[::max(1, len(rows) // sample)][:sample]      # 铺开取样，别只看最高曝光
+    rows = _pool_sample(pool, sample)
     key, base, model = _ai_config()
     if len(rows) < 8 or not key:
         return old or {}
