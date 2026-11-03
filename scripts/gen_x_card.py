@@ -2306,6 +2306,16 @@ def main():
                                     {"text": "太短", "v": 1, "cat": "a"}])
             assert len(got) == 1, got
             assert bangdan_stats(got)["len"] > 0, "池子规模算不出来"
+            # 补全文后不能被当成新的一条再进一次（旧键取前 60 字，一补全文就重了）
+            _bd_pool_add(td, [{"id": "9", "handle": "a", "text": "短" * 100}])
+            got = _bd_pool_add(td, [{"id": "9", "handle": "a", "text": "长" * 300}])
+            assert len([r for r in got if r.get("id") == "9"]) == 1, got
+            assert any(r.get("u", "").endswith("/status/9") for r in got), "没存原文链接"
+            # 识别词过滤：专有名词、只出现一次的词不许留；通用信号词留下
+            demo_pool = [{"text": "彩礼 反悔 " * 5}] * 3
+            cleaned = _clean_signs([{"name": "x", "sign": ["彩礼", "反悔", "USDT", "姆巴佩"]}],
+                                   demo_pool)
+            assert cleaned and cleaned[0]["sign"] == ["彩礼", "反悔"], cleaned
             (Path(td) / _BD_POOL_FILE).write_text(json.dumps(
                 [{"d": f"2000-01-{d:02d}", "v": 1, "cat": "", "text": "旧" * 200}
                  for d in range(1, 16)]), encoding="utf-8")
@@ -2513,6 +2523,15 @@ _BD_POOL_FILE = "bangdan_pool.json"      # 范文池，落在 docs/x/ 下跟着 
 _BD_POOL_DAYS = 14
 
 
+def _bd_key(r):
+    """池子里的同一条怎么认：有推文 id 用 id，没有就用正文前 24 字。
+
+    以前拿「当前文本前 60 字」当键，补全文后前 60 字变了，下次再抓同一篇就认不出来，
+    于是同一条越补越复制（实测 303 篇里 144 篇是重复）。
+    """
+    return r.get("id") or re.sub(r"\s+", "", r.get("text") or "")[:24]
+
+
 def _bd_pool(out_dir):
     """读范文池：累积的爆款原文，跨天去重。读不到就是第一次跑。"""
     try:
@@ -2535,21 +2554,26 @@ def _bd_pool_add(out_dir, bang, now=None, cap=600, max_n=2000):
     now = now or datetime.now()
     day = f"{now:%Y-%m-%d}"
     pool = _bd_pool(out_dir)
-    idx = {r["text"][:60]: n for n, r in enumerate(pool)}
+    idx = {}
+    for n, r in enumerate(pool):
+        idx.setdefault(_bd_key(r), n)
     added = []
     for r in bang or []:
         t = re.sub(r"\n{2,}", "\n", (r.get("text") or "").strip())
         if len(t) < 60:                      # 单句 / 转发型短帖学不到写法
             continue
-        k = t[:60]
+        k = r.get("id") or re.sub(r"\s+", "", t)[:24]
         if k in idx:                         # 同一篇又来了：榜单摘要只有 80 字，
             n = idx[k]                       # 拿更长的全文换掉它，范文才有结构可学
             if len(t) > len(pool[n]["text"]):
                 pool[n]["text"] = t[:cap]
             continue
         idx[k] = len(pool)
+        hid = r.get("id") or ""
+        handle = r.get("handle") or ""
         entry = {"d": day, "v": r.get("v") or 0, "cat": r.get("cat") or "",
-                 "id": r.get("id") or "", "h": r.get("handle") or "", "text": t[:cap]}
+                 "id": hid, "h": handle, "text": t[:cap],
+                 "u": f"https://x.com/{handle}/status/{hid}" if hid and handle else ""}
         pool.append(entry)
         added.append(entry)
 
@@ -2636,7 +2660,9 @@ _TYPES_SYSTEM = """你在给一个中文社媒热点账号做选题分析。看�
 - name  4~8 字的类型名，一眼看出是什么事；不许出现公司名、产品名、人名、事件名
 - desc  一句话：这类爆款在讲什么、为什么跑得动
 - sign  8~12 个识别词，用来在新闻标题里认出同类题材。挑「同类事件都会出现的词」
-        （彩礼 / 涨价 / 退货 / 翻车 / 实测 / 骗局 / 欠薪 / 反悔），别挑只属于今天那条新闻的词
+        （彩礼 / 涨价 / 退货 / 翻车 / 实测 / 骗局 / 欠薪 / 反悔），别挑只属于今天那条新闻的词。
+        人名、公司名、品牌名、型号一律不许进 sign；带英文字母或数字的（USDT、GPT-6、iPhone）
+        也算专有名词，整个词作废。
 - how   这类爆款通常怎么写：开头怎么起、写几段、每段多长、怎么收尾。2~3 句，要具体，
         别写「要有感染力」这种空话。这条会直接当写作指令用，所以必须能照着做。
 - hot   这类在样本里大概占多少，0~1 的小数
@@ -2692,6 +2718,31 @@ def load_types(out_dir):
             if isinstance(t, dict) and t.get("name") and t.get("sign")]
 
 
+_SIGN_LATIN = re.compile(r"[A-Za-z0-9]")
+
+
+def _clean_signs(types, pool):
+    """识别词只留「通用信号」：整池里至少 3 篇出现过，且不带人名/型号味。
+
+    模型嘴上答应不写专有名词，实际照样吐「中际旭创」「姆巴佩」「GPT-6」。这些词拿去
+    匹配新闻标题几乎不命中，还会把「昨天那条热搜」当成长期类型，所以这里硬过滤一遍。
+    """
+    texts = [r.get("text") or "" for r in pool]
+    out = []
+    for t in types:
+        keep = []
+        for s in t.get("sign") or []:
+            s = str(s).strip()
+            if not 2 <= len(s) <= 6 or _SIGN_LATIN.search(s):
+                continue
+            if sum(1 for x in texts if s in x) < 3:
+                continue
+            keep.append(s)
+        if len(keep) >= 2:
+            out.append({**t, "sign": keep[:8]})
+    return out
+
+
 def learn_types(out_dir, pool, now=None, sample=24):
     """把整个范文池交给模型，总结出今天跑得动的「内容类型」，当天只算一次。
 
@@ -2723,6 +2774,7 @@ def learn_types(out_dir, pool, now=None, sample=24):
         except ValueError:
             types = []
     types = [t for t in types if isinstance(t, dict) and t.get("name") and t.get("sign")]
+    types = _clean_signs(types, pool)
     # 提示词要 6~10 类，模型常一口气给 20 多类（「软件安装」「点赞分析」这种太碎，
     # 套到新闻上全是噪声）。只留占比最高的 10 类。
     types = sorted(types, key=lambda t: -(t.get("hot") or 0))[:10]
