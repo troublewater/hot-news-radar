@@ -259,24 +259,8 @@ jobs:
           python3 scripts/gen_x_card.py --site "$SITE_URL" --learn-only
           ls -lh docs/x/
 
-      - name: Build daily picks pack
-        if: success()
-        continue-on-error: true
-        env:
-          SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
-          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          AI_MODEL: ${{ secrets.AI_MODEL }}
-          AI_API_BASE: ${{ secrets.AI_API_BASE }}
-          X_WRITER_API_KEY: ${{ secrets.X_WRITER_API_KEY }}
-          XHS_WRITER_MODEL: ${{ secrets.XHS_WRITER_MODEL }}
-          XHS_WRITER_API_BASE: ${{ secrets.XHS_WRITER_API_BASE }}
-          XHS_WRITER_API_KEY: ${{ secrets.XHS_WRITER_API_KEY }}
-        run: |
-          set -e
-          python3 scripts/xhs_pack.py --source docs/reports/latest/current.html \
-            --out-dir docs/xhs --top 30 --site "$SITE_URL"
-          ls -lh docs/xhs/
+      # 今日热点精选（xhs/pack.html + 飞书板块二）已停：页面不再生成，Sync 会顺带把
+      # reports 分支上的 xhs/ 删掉。要恢复，把这一步和 scripts/xhs_pack.py 一起加回来。
 
       # ── 提交到 reports 分支（Pages 发布源）─────────────────────────────
       # 孤儿提交 + git push --force-with-lease=reports:<REPORTS_BASE_OID>：
