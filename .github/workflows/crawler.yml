@@ -8,7 +8,8 @@ on:
     # 按真实触发记录回放命中率 28/28、23/28 天。不使用外部 cron。
     # 窗口内只推一次靠调度器的 once 防重：其执行记录在 output/news/<date>.db，
     # 由下面的 actions/cache 跨运行保留。
-    - cron: "5,35 * * * *"
+    # 每 20 分钟一次（原为每小时两次）；保留 45 天全量快照以压住站点体积。
+    - cron: "*/20 * * * *"
 
   workflow_dispatch:
 
@@ -219,7 +220,7 @@ jobs:
           # 才渲染「更早归档」入口。
           python3 scripts/gen_daily_index.py
           python3 scripts/gen_archive.py
-          KEEP_FULL_DAYS=90 python3 scripts/retention.py
+          KEEP_FULL_DAYS=45 python3 scripts/retention.py
           # reports/index.html 在 gen_archive 之前复制，让它按自身层级修正导航前缀
           if [ -f docs/reports/latest/incremental.html ]; then
             cp docs/reports/latest/incremental.html docs/reports/index.html
