@@ -38,28 +38,9 @@ import gen_x_card as gx          # noqa: E402  复用解析 / 爆款源 / AI / �
 # 爆款源提供的是「选什么题、用什么角度写」：今天风向里哪几类跑得动，就照这几类去
 # 找有潜力的新闻。**不是**拿标题去跟爆款正文撞词——撞上了说明该直接搬爆款，
 # 用不着费劲找新闻源。
-_STYLE_HINT = [
-    ("奇观猎奇", r"奇观|罕见|首次|首例|第一次|离谱|魔幻|奇葩|惊呆|破纪录|极限|第一人"),
-    ("暴论观点", r"争议|吵|怼|怒|骂|反驳|质疑|不满|抵制|炮轰|打脸|开撕"),
-    ("家庭日常", r"彩礼|婚|婆媳|丈母娘|夫妻|离婚|份子钱|带娃|爸妈"),
-    ("民间共鸣", r"网友|热议|吐槽|投诉|维权|曝光|翻车|割韭菜|踩雷"),
-    ("都市夜话", r"男子|女子|大爷|大妈|小伙|业主|邻居|室友|同事|顾客|外卖|司机"),
-    # 「快讯播报」故意不列：通报体是照实写的那种，正是二创写不出东西的题
-]
-
-# 「写得出爆款吗」——这才是入选门槛。爆款的共同点是：有件具体的事、有反转或反差、
-# 落在一个能引起共鸣的话题上。光热但没法讲的（政策、财报、发布会、提问帖、工具推荐）
-# 一律不选。
-# 这里**不**把「有没有具体的人」当标准：没有名字的事一样能选，名字由模型编出来的才要拦
-# （见 gen_x_card.invented_names）。
-_STORY = [
-    ("有冲突", r"反转|翻车|被坑|被骗|维权|投诉|吐槽|怒|吵|起诉|罚款|赔|抵制|退款|撕|"
-             r"举报|纠纷|闹|拦|抢|逃|骗"),
-    ("有反差", r"断裂|断了|塌|崩|爆炸|炸裂|离谱|奇葩|罕见|首次|首例|第一次|奇观|魔幻|"
-             r"惊|居然|竟然"),
-    ("有具体数字", r"[0-9０-９一二三四五六七八九十]+[个条名辆次岁人元万块天年万亿]"),
-]
-_CONFLICT = re.compile(r"反转|翻车|被骗|被坑|罚款|赔偿|起诉|告上|怒|吵|塌房|退款|维权|抵制|冲突|争议|道歉|打|砸|逃")
+# 选题只认两样东西：当天从范文池蒸馏出来的「内容类型」（learn_types）＋通用的
+# 「这条有没有可讲的事」。这里不再写死任何题材偏好——婚恋、街坊、争议都不是加分项，
+# 池子换了，选出来的题就跟着换。
 
 # 提问帖 / 工具推荐：没有可讲的「事」，二创只能抄问题或照着说明书复述
 _ASK = re.compile(r"^如何看待|^怎么看|^如何看|^如何评价|是什么体验|求推荐|值得买吗|"
@@ -77,27 +58,12 @@ def score_news(items, fp, keywords, weights=None, types=None):
     这一步才是「用爆款的逻辑推测新闻的潜在价值」：机制和类型都是同一张表，能同时套在
     爆款正文和新闻标题上，所以可以从一边学到、用在另一边。
     """
-    styles = {s for s in gx._bd_named(fp.get("styles", []), 4, skip="其他")}
     out = []
     for it in items:
         t = it["title"]
         if gx._AD_HOT.search(t):          # 广告 / 开售稿直接踢，别再让它混进 TOP1
             continue
         why, sc = [], 0.0
-        story = [name for name, pat in _STORY if re.search(pat, t)]
-        if story:
-            sc += 3 * len(story)
-            why += story
-        # 对上今天跑得动的风格：同样的事，风向里的角度更容易跑起来
-        style = [name for name, pat in _STYLE_HINT if name in styles and re.search(pat, t)]
-        sc += 2 * len(style)
-        why += [f"贴「{n}」" for n in style]
-        weights = weights or {}
-        # 有当天从爆款池总结出来的类型时，机制让位：类型是现学的，机制是写死的 8 个筐。
-        mech = [] if types else [m for m in gx._mech_hits(t) if weights.get(m)]
-        if mech:
-            sc += sum(3 * weights[m] for m in mech)
-            why += [f"爆款逻辑「{m}」" for m in mech]
         # 撞上范文池总结出来的内容类型：题材对上了，就是「这类爆款在讲的事」
         ty = gx.match_types(t, types)
         if ty:
@@ -115,15 +81,15 @@ def score_news(items, fp, keywords, weights=None, types=None):
         if _ASK.search(t):
             sc -= 4
             why.append("提问帖/工具贴（没故事可讲）")
-        if _FACT_ONLY.search(t) and len(story) < 2:
+        if _FACT_ONLY.search(t) and not ty:
             sc -= 3
             why.append("只有数据没有事")
         if gx._NEWSY_TITLE.search(t):
             sc -= 4
             why.append("新闻腔（只能照实写）")
-        # 够格入选：至少两个「有故事」的信号，或者一个信号 + 对上今天的风向
-        strong = [m for m in mech if weights.get(m, 0) >= 0.5]     # 学出来特别稳的机制
-        fit = len(story) >= 2 or bool(ty) or bool(story and (style or strong))
+        # 够格入选只看「撞没撞上池子里的类型」；没有类型（蒸馏失败）时全放行，
+        # 宁可让 pick_top 按分数和去重去挑，也不要再塞一套写死的偏好进来
+        fit = bool(ty) if types else True
         out.append({"score": round(sc, 1), "why": why, "item": it, "fit": fit,
                     "type": ty[0] if ty else ""})
     out.sort(key=lambda x: -x["score"])
@@ -153,7 +119,7 @@ def pick_top(scored, top, keywords):
     for cap in (3, 4):
         for i, row in enumerate(scored):
             if i in taken or not row.get("fit"):
-                continue          # 没有故事相的，热也不选
+                continue          # 没撞上池子里的类型，热也不选
             if any(_same_event(bags[i], b) for b in seen):
                 continue          # 同一个事，换了个说法也不行
             groups = {g for g in (next((w for w in gx._THEME_WORDS if w in row["item"]["title"]), None),
@@ -170,7 +136,7 @@ def pick_top(scored, top, keywords):
             picked.append(row)
             if len(picked) >= top:
                 return picked
-    # 兜底：够格的不到 10 条时按分数补位，但把「这条没有故事相」写进理由，
+    # 兜底：够格的不到 10 条时按分数补位，但把「这条没撞上类型」写进理由，
     # 免得跟真够格的混在一起，事后分不清哪些是硬凑的
     for i, row in enumerate(scored):
         if i in taken:
@@ -178,7 +144,7 @@ def pick_top(scored, top, keywords):
         if any(_same_event(bags[i], b) for b in seen):
             continue          # 补位也不让同一个事件再来一条
         seen.append(bags[i])
-        row["why"].append("备选（没有故事相）")
+        row["why"].append("备选（未命中池里的类型）")
         taken.add(i)
         picked.append(row)
         if len(picked) >= top:
@@ -581,13 +547,14 @@ def selftest():
              "rank": 1, "count": "", "trend": "", "group": "彩礼婚恋"}]
     typed = score_news(demo, {"styles": [], "hooks": []}, [], types=types_demo)
     assert typed[0]["type"] == "婚房算账" and "类型「婚房算账」" in typed[0]["why"], typed[0]
-    sc = score_news(items, fp, ["楼市", "翻车"])
+    pool_types = [{"name": "翻车现场", "sign": ["翻车"], "hot": 0.3}]
+    sc = score_news(items, fp, ["楼市", "翻车"], types=pool_types)
     assert all("开售" not in r["item"]["title"] for r in sc), "广告稿没被踢掉"
     assert sc[0]["item"]["title"].startswith("商k"), sc[0]
     assert sc[-1]["item"]["title"].startswith("购房贷款"), "新闻腔没被压分"
-    assert sc[0]["fit"] and not sc[-1]["fit"], "「有故事」才该够格，政策稿不该"
+    assert sc[0]["fit"] and not sc[-1]["fit"], "只有命中池里的类型才够格，政策稿不该"
     picked = pick_top(sc, 2, ["楼市", "翻车"])
-    assert "备选（没有故事相）" in picked[1]["why"], picked[1]
+    assert "备选（未命中池里的类型）" in picked[1]["why"], picked[1]
     assert len(picked) == 2
     picked[0]["item"]["orig"] = "https://e.com/p.jpg"
     page = render_pack(picked, [{"i": 1, "title": "标题", "body": "正文", "tags": ["a"],
@@ -609,6 +576,10 @@ def selftest():
     assert gx.invented_names("王奶奶把养老钱捂得紧紧的。", "") == ["王奶奶"]
     # 挑题不再看「有没有具体的人」：没有名字但没有冲突/反差的题不该被这条规则压分
     assert not any("有具体的人" in w for r in sc for w in r["why"]), "「有具体的人」还在打分"
+    # 写死的题材偏好必须已经清掉：婚恋类标题不该靠关键词自动加分
+    none_types = score_news([{"title": "彩礼涨到38万，男方当场走人", "platforms": ["微博"],
+                              "rank": 1, "group": "", "url": ""}], fp, [], types=None)
+    assert none_types[0]["score"] == 2, none_types[0]      # 只剩榜内前三那 2 分
     got = _xhs_parse('\u0060\u0060\u0060json\n[{"i":1,"title":"标题","paras":["第一段","第二段"],"tags":"#a、b"}]\n\u0060\u0060\u0060')
     assert got and got[0]["body"] == "第一段\n\n第二段" and got[0]["tags"] == ["a", "b"], got
     assert _xhs_parse("模型今天罢工了") == []
