@@ -271,6 +271,9 @@ jobs:
       - name: Sync docs/ to reports branch
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # 保留期改 45 天后文档数稳定在 ~500，原来的 500 安全阈值正好卡死发布；
+          # 300 仍能在历史报告恢复失败（只剩几十个文件）时拦住残缺发布。
+          SYNC_MIN_FILES: "300"
         run: |
           python3 scripts/sync_reports_branch.py --from-dir=docs \
             --repo-dir=/tmp/pages-content --expect-oid="$REPORTS_BASE_OID"
