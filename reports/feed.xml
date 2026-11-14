@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel>
+<title>Hot News Radar 快照订阅</title>
+<link>https://leilaomi.github.io/hot-news-radar/</link>
+<atom:link href="https://leilaomi.github.io/hot-news-radar/reports/feed.xml" rel="self" type="application/rss+xml"/>
+<description>每日新闻雷达快照更新通知</description>
+<language>zh-CN</language>
+<lastBuildDate>Sun, 15 Nov 2026 00:51:00 +0800</lastBuildDate>
+<item>
+<title>2026-11-15 热点雷达 · 1 个时段快照</title>
+<link>https://leilaomi.github.io/hot-news-radar/reports/2026-11-15/00-51.html</link>
+<guid isPermaLink="false">2026-11-15</guid>
+<pubDate>Sun, 15 Nov 2026 00:51:00 +0800</pubDate>
+<description>2026-11-15 共 1 次抓取，覆盖全天热点变化。首次 00:51，末次 00:51。</description>
+</item>
+<item>
+<title>2026-11-14 热点雷达 · 4 个时段快照</title>
+<link>https://leilaomi.github.io/hot-news-radar/reports/2026-11-14/18-54.html</link>
+<guid isPermaLink="false">2026-11-14</guid>
+<pubDate>Sat, 14 Nov 2026 18:54:00 +0800</pubDate>
+<description>2026-11-14 共 4 次抓取，覆盖全天热点变化。首次 02:05，末次 18:54。</description>
+</item>
+<item>
+<title>2026-11-13 热点雷达 · 4 个时段快照</title>
+<link>https://leilaomi.github.io/hot-news-radar/reports/2026-11-13/18-33.html</link>
+<guid isPermaLink="false">2026-11-13</guid>
+<pubDate>Fri, 13 Nov 2026 18:33:00 +0800</pubDate>
+<description>2026-11-13 共 4 次抓取，覆盖全天热点变化。首次 01:04，末次 18:33。</description>
+</item>
+<item>
+<title>2026-11-12 热点雷达 · 3 个时段快照</title>
+<link>https://leilaomi.github.io/hot-news-radar/reports/2026-11-12/16-23.html</link>
+<guid isPermaLink="false">2026-11-12</guid>
+<pubDate>Thu, 12 Nov 2026 16:23:00 +0800</pubDate>
+<description>2026-11-12 共 3 次抓取，覆盖全天热点变化。首次 02:44，末次 16:23。</description>
+</item>
+<item>
+<title>2026-11-11 热点雷达 · 4 个时段快照</title>
+<link>https://leilaomi.github.io/hot-news-radar/reports/2026-11-11/19-05.html</link>
+<guid isPermaLink="false">2026-11-11</guid>
+<pubDate>Wed, 11 Nov 2026 19:05:00 +0800</pubDate>
+<description>2026-11-11 共 4 次抓取，覆盖全天热点变化。首次 02:44，末次 19:05。</description>
+</item>
+<item>
+<title>2026-11-10 热点雷达 · 3 个时段快照</title>
+<link>https://leilaomi.github.io/hot-news-radar/reports/2026-11-10/19-15.html</link>
+<guid isPermaLink="false">2026-11-10</guid>
+<pubDate>Tue, 10 Nov 2026 19:15:00 +0800</pubDate>
+<description>2026-11-10 共 3 次抓取，覆盖全天热点变化。首次 04:51，末次 19:15。</description>
+</item>
+<item>
+<title>2026-11-09 热点雷达 · 4 个时段快照</title>
+<link>https://leilaomi.github.io/hot-news-radar/reports/2026-11-09/18-21.html</link>
+<guid isPermaLink="false">2026-11-09</guid>
+<pubDate>Mon, 09 Nov 2026 18:21:00 +0800</pubDate>
+<description>2026-11-09 共 4 次抓取，覆盖全天热点变化。首次 03:44，末次 18:21。</description>
+</item>
+</channel></rss>
