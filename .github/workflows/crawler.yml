@@ -156,11 +156,12 @@ jobs:
           AI_DEDUP_ENABLED: ${{ secrets.AI_DEDUP_ENABLED }}
           AI_DAILY_ENABLED: ${{ secrets.AI_DAILY_ENABLED }}
           AI_FILTER_ENABLED: ${{ secrets.AI_FILTER_ENABLED }}
-          # 板块二（X 文案）与今日热点精选可以单独接一家供应商，三个都填才生效
-          X_WRITER_API_KEY: ${{ secrets.X_WRITER_API_KEY }}
-          XHS_WRITER_MODEL: ${{ secrets.XHS_WRITER_MODEL }}
-          XHS_WRITER_API_BASE: ${{ secrets.XHS_WRITER_API_BASE }}
-          XHS_WRITER_API_KEY: ${{ secrets.XHS_WRITER_API_KEY }}
+          # 写作模型（板块二 / 今日热点精选）已停用，DeepSeek 的 key 不再注入，
+          # 免得哪天脚本又去调它产生费用。要恢复：去掉下面几行的注释并填好 secret。
+          # X_WRITER_API_KEY: ${{ secrets.X_WRITER_API_KEY }}
+          # XHS_WRITER_MODEL: ${{ secrets.XHS_WRITER_MODEL }}
+          # XHS_WRITER_API_BASE: ${{ secrets.XHS_WRITER_API_BASE }}
+          # XHS_WRITER_API_KEY: ${{ secrets.XHS_WRITER_API_KEY }}
           # 远程存储（四项齐全才会启用 S3，否则用上面恢复的本地库）
           S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
           S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
